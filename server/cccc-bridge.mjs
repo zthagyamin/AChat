@@ -8,9 +8,11 @@ import { fileURLToPath } from 'node:url';
 import {
   discoverLocalSessions,
   executeExternalAgentTurn,
+  getActiveExternalSlots,
   isAgentRoutedExternally,
   normalizeSessionRouting,
   readExternalSessionPreview,
+  resolveRoutingSlot,
 } from './session-router.mjs';
 import {
   PROVIDER_CATALOG_META,
@@ -26,6 +28,7 @@ import {
   extractActorSubtaskHint,
   parseCollabSignal,
   parseIdeStepsFromText,
+  parseReviewVerdict,
   pushBoardRecentAction,
   stripIdeProtocolTags,
 } from './ide-collab.mjs';
@@ -614,6 +617,7 @@ export function computeGroupsFingerprint(groups = []) {
       memberCount: g.memberCount,
       messageCount: g.messageCount,
       lastMessage: g.lastMessage || null,
+      externalThinking: g.externalThinking || [],
       actors: (g.actors || []).map((a) => ({
         id: a.id,
         title: a.title,
@@ -2579,6 +2583,20 @@ export class CcccBridge extends EventEmitter {
           : 'read-only';
 
         const sessionRouting = normalizeSessionRouting(prefs.sessionRouting, activeScopePath);
+        const extThinkMap = this.externalThinkingActors.get(g.group_id);
+        const externalThinking = extThinkMap
+          ? Array.from(extThinkMap.entries()).map(([slotId, info]) => {
+              const slotMeta = resolveRoutingSlot(sessionRouting, slotId);
+              return {
+                id: slotId,
+                title: slotMeta?.label || slotId,
+                provider: slotMeta?.provider || (String(slotId).startsWith('codex') ? 'codex' : 'antigravity'),
+                since: info?.since || null,
+                label: info?.label || '',
+              };
+            })
+          : [];
+        const activeExtSlots = getActiveExternalSlots(sessionRouting);
 
         return {
           id: g.group_id,
@@ -2593,6 +2611,7 @@ export class CcccBridge extends EventEmitter {
           speedGear,
           replyStyle,
           sessionRouting,
+          externalThinking,
           agentProfiles,
           codexSandbox,
           collabMode,
@@ -2600,7 +2619,7 @@ export class CcccBridge extends EventEmitter {
           ideBoard: this.getIdeBoardSnapshot(g.group_id),
           pinned: Boolean(prefs.pinned),
           archived: Boolean(prefs.archived),
-          memberCount: actors.length + 1, // +1 for User ("我")
+          memberCount: (activeExtSlots.length > actors.length ? activeExtSlots.length : actors.length) + 1, // +1 for User ("我")
           messageCount: chatMsgs.length,
           lastMessage: lastMsg
             ? {
@@ -2765,7 +2784,7 @@ export class CcccBridge extends EventEmitter {
         board.stageText = '⏹ 已手动中断当前执行';
         board.updatedAt = new Date().toISOString();
         for (const aState of Object.values(board.actors || {})) {
-          if (aState && ['aligning', 'running', 'collab'].includes(aState.phase)) {
+          if (aState && ['aligning', 'running', 'collab', 'reviewing', 'rework'].includes(aState.phase)) {
             aState.phase = 'error';
             aState.phaseLabel = '已中断';
             aState.currentAction = '⏹ 用户已手动中断执行';
@@ -3277,23 +3296,72 @@ export class CcccBridge extends EventEmitter {
     this.emit('ideBoard', { groupId, ideBoard: this.getIdeBoardSnapshot(groupId) });
   }
 
-  ensureGroupIdeBoard(groupId, { taskTitle = '', stageText = '', round = null, reset = false } = {}) {
+  ensureGroupIdeBoard(groupId, { taskTitle = '', stageText = '', round = null, reset = false, slots = null } = {}) {
     let board = reset ? null : this.ideBoards.get(groupId);
     const nowIso = new Date().toISOString();
+    const buildActorsFromSlots = (slotList) => {
+      const map = {};
+      for (const s of slotList) {
+        if (!s?.slotId) continue;
+        map[s.slotId] = createActorBoardState(s.slotId, {
+          title: s.label || s.slotId,
+          provider: s.provider,
+          role: s.role || 'peer',
+          sessionTitle: s.sessionTitle || '',
+          sessionMode: s.mode || 'group',
+          sessionId: s.sessionId || '',
+        });
+      }
+      return map;
+    };
+
     if (!board) {
+      const initialActors =
+        Array.isArray(slots) && slots.length > 0
+          ? buildActorsFromSlots(slots)
+          : {
+              codex: createActorBoardState('codex', { title: 'Codex', provider: 'codex' }),
+              antigravity: createActorBoardState('antigravity', {
+                title: 'Antigravity',
+                provider: 'antigravity',
+              }),
+            };
       board = {
         groupId,
         taskTitle: String(taskTitle || '').slice(0, 96),
         stageText: String(stageText || ''),
         round: Number(round || 1),
         updatedAt: nowIso,
-        actors: {
-          codex: createActorBoardState('codex', { title: 'Codex' }),
-          antigravity: createActorBoardState('antigravity', { title: 'Antigravity' }),
-        },
+        actors: initialActors,
       };
       this.ideBoards.set(groupId, board);
     } else {
+      if (Array.isArray(slots) && slots.length > 0) {
+        const nextActors = {};
+        for (const s of slots) {
+          if (!s?.slotId) continue;
+          const prevActor = board.actors?.[s.slotId];
+          nextActors[s.slotId] = prevActor
+            ? {
+                ...prevActor,
+                title: s.label || prevActor.title,
+                provider: s.provider || prevActor.provider,
+                role: s.role || prevActor.role || 'peer',
+                sessionTitle: s.sessionTitle || prevActor.sessionTitle || '',
+                sessionMode: s.mode || prevActor.sessionMode || 'group',
+                sessionId: s.sessionId || prevActor.sessionId || '',
+              }
+            : createActorBoardState(s.slotId, {
+                title: s.label || s.slotId,
+                provider: s.provider,
+                role: s.role || 'peer',
+                sessionTitle: s.sessionTitle || '',
+                sessionMode: s.mode || 'group',
+                sessionId: s.sessionId || '',
+              });
+        }
+        board.actors = nextActors;
+      }
       if (taskTitle) board.taskTitle = String(taskTitle).slice(0, 96);
       if (stageText !== undefined && stageText !== '') board.stageText = String(stageText);
       if (typeof round === 'number' && round > 0) board.round = round;
@@ -3307,7 +3375,11 @@ export class CcccBridge extends EventEmitter {
     const board = this.ensureGroupIdeBoard(groupId);
     const prev =
       board.actors[actorId] ||
-      createActorBoardState(actorId, { title: actorId === 'codex' ? 'Codex' : 'Antigravity' });
+      createActorBoardState(actorId, {
+        title: patch.title || (actorId === 'codex' ? 'Codex' : actorId === 'antigravity' ? 'Antigravity' : actorId),
+        provider: patch.provider,
+        role: patch.role,
+      });
     const nowIso = new Date().toISOString();
     const next = {
       ...prev,
@@ -3327,6 +3399,99 @@ export class CcccBridge extends EventEmitter {
     return next;
   }
 
+  resolveExternalSlotRecipients(cleanText = '', explicitTo = [], routing = {}, actors = []) {
+    const slots = Array.isArray(routing?.slots) ? routing.slots : [];
+    const activeExternal = getActiveExternalSlots(routing);
+    const activeSet = new Set(activeExternal.map((s) => s.slotId));
+    // Hybrid 2-slot compatibility: if only legacy slots exist and at least 1 is external, both participate on @all
+    const legacyTwoSlots =
+      slots.length === 2 &&
+      slots.every((s) => s.slotId === 'codex' || s.slotId === 'antigravity') &&
+      activeExternal.length > 0;
+    const candidateSlots =
+      legacyTwoSlots
+        ? slots
+        : activeExternal.length > 0
+          ? activeExternal
+          : slots;
+
+    const chosen = new Set();
+    const textMentions = new Set();
+    let mentionAllInText = false;
+    const mentionMatches = String(cleanText || '').matchAll(/@([a-zA-Z0-9_\u4e00-\u9fa5·#-]+)/g);
+    for (const m of mentionMatches) {
+      const token = String(m[1] || '').trim().toLowerCase();
+      if (!token) continue;
+      if (token === 'all' || token === '所有人' || token === '全部会话') {
+        mentionAllInText = true;
+        for (const s of candidateSlots) textMentions.add(s.slotId);
+        continue;
+      }
+      const exactSlot = candidateSlots.find(
+        (s) => s.slotId.toLowerCase() === token || (s.label || '').toLowerCase() === token
+      );
+      if (exactSlot) {
+        textMentions.add(exactSlot.slotId);
+      } else if (token === 'codex' || token === 'antigravity') {
+        for (const s of candidateSlots) {
+          if (s.provider === token) textMentions.add(s.slotId);
+        }
+      } else {
+        for (const a of actors || []) {
+          if (a.id.toLowerCase() === token || (a.title || '').toLowerCase() === token) {
+            textMentions.add(a.id);
+          }
+        }
+      }
+    }
+
+    const isExplicitAll =
+      !Array.isArray(explicitTo) ||
+      explicitTo.length === 0 ||
+      explicitTo.includes('@all') ||
+      explicitTo.includes('all');
+
+    if (textMentions.size > 0 && isExplicitAll) {
+      for (const id of textMentions) chosen.add(id);
+    } else if (!isExplicitAll) {
+      for (const rawItem of explicitTo) {
+        const item = String(rawItem || '').trim().replace(/^@/, '');
+        const lower = item.toLowerCase();
+        const found = candidateSlots.find(
+          (s) => s.slotId === item || s.slotId.toLowerCase() === lower || (s.label || '').toLowerCase() === lower
+        );
+        if (found) {
+          chosen.add(found.slotId);
+        } else if (lower === 'codex' || lower === 'antigravity') {
+          for (const s of candidateSlots) {
+            if (s.provider === lower) chosen.add(s.slotId);
+          }
+        }
+      }
+      for (const id of textMentions) chosen.add(id);
+    }
+
+    if (chosen.size === 0) {
+      for (const s of candidateSlots) chosen.add(s.slotId);
+      return {
+        recipients: Array.from(chosen),
+        isBroadcastAll: true,
+        activeSet,
+      };
+    }
+
+    const recipients = Array.from(chosen);
+    const isBroadcastAll =
+      Boolean(mentionAllInText || (isExplicitAll && textMentions.size === 0)) ||
+      (candidateSlots.length > 1 && recipients.length >= candidateSlots.length);
+
+    return {
+      recipients,
+      isBroadcastAll,
+      activeSet,
+    };
+  }
+
   async runTargetSessionForActor({
     groupId,
     targetGroup,
@@ -3338,23 +3503,41 @@ export class CcccBridge extends EventEmitter {
     phase = 'exec',
     forcePermission = null,
   }) {
-    const actorInfo = (targetGroup.actors || []).find((a) => a.id === actorId) || {
+    const slotCfg =
+      resolveRoutingSlot(routing, actorId) ||
+      routing?.[actorId] || {
+        slotId: actorId,
+        provider: actorId === 'codex' ? 'codex' : 'antigravity',
+        label: '',
+        role: 'peer',
+        mode: 'group',
+        sessionId: '',
+        sessionTitle: '',
+        cwd: '',
+      };
+    const provider =
+      slotCfg.provider === 'codex' || slotCfg.provider === 'antigravity'
+        ? slotCfg.provider
+        : actorId === 'codex'
+          ? 'codex'
+          : 'antigravity';
+    const actorInfo = (targetGroup.actors || []).find((a) => a.id === actorId || a.id === provider) || {
       id: actorId,
       title:
-        PROVIDER_CATALOG_META[actorId]?.title ||
-        (actorId === 'codex' ? 'Codex' : 'Antigravity'),
+        PROVIDER_CATALOG_META[provider]?.title ||
+        (provider === 'codex' ? 'Codex' : 'Antigravity'),
     };
     const profiles = normalizeAgentProfiles(this.groupPrefs[groupId]?.agentProfiles);
-    const actorProfile = profiles[actorId] || { displayName: '', model: '', persona: '' };
-    const personaDirective = buildAgentPersonaDirective(actorId, profiles);
-    const agentCfg = routing[actorId] || { mode: 'group', sessionId: '', sessionTitle: '', cwd: '' };
+    const actorProfile = profiles[actorId] || profiles[provider] || { displayName: '', model: '', persona: '' };
+    const personaDirective = buildAgentPersonaDirective(provider, profiles);
+    const agentCfg = slotCfg;
     let effectiveMode = agentCfg.mode || 'group';
     let effectiveSessionId = agentCfg.sessionId || '';
     let effectiveCwd = agentCfg.cwd || targetGroup.scopePath || DEFAULT_ROOM_DIR;
 
     // If actor remained in 'group' mode while peer was routed externally, reuse group's bound session/scope cleanly
     if (effectiveMode === 'group') {
-      if (actorId === 'codex') {
+      if (provider === 'codex' && actorId === 'codex') {
         const sFile = path.join(
           this.groupsDir,
           groupId,
@@ -3384,16 +3567,17 @@ export class CcccBridge extends EventEmitter {
     const fullPrompt = personaDirective
       ? `${personaDirective}\n\n${prompt}\n\n${styleDirective}`
       : `${prompt}\n\n${styleDirective}`;
-    const codexBin = actorId === 'codex' ? await resolveCodexBinary() : 'codex';
+    const codexBin = provider === 'codex' ? await resolveCodexBinary() : 'codex';
 
     const streamId = `stream-${groupId}-${actorId}-${phase}-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 6)}`;
     const senderTitle =
+      slotCfg.label ||
       actorProfile.displayName ||
       actorInfo.title ||
-      PROVIDER_CATALOG_META[actorId]?.title ||
-      (actorId === 'codex' ? 'Codex' : 'Antigravity');
+      PROVIDER_CATALOG_META[provider]?.title ||
+      (provider === 'codex' ? 'Codex' : 'Antigravity');
     let lastEmitMs = 0;
     let lastBoardEmitMs = 0;
     let latestStep = '🚀 正在唤醒目标会话…';
@@ -3408,7 +3592,11 @@ export class CcccBridge extends EventEmitter {
         ? 'aligning'
         : phase === 'collab_sync'
           ? 'collab'
-          : 'running';
+          : phase === 'lead_review'
+            ? 'reviewing'
+            : phase === 'rework'
+              ? 'rework'
+              : 'running';
     const turnStartedIso = new Date().toISOString();
 
     this.updateActorIdeBoardState(
@@ -3416,6 +3604,8 @@ export class CcccBridge extends EventEmitter {
       actorId,
       {
         title: senderTitle,
+        provider,
+        role: slotCfg.role || 'peer',
         phase: boardPhaseForTurn,
         sessionTitle: resolvedSessionTitle,
         sessionMode: agentCfg.mode || 'group',
@@ -3516,14 +3706,16 @@ export class CcccBridge extends EventEmitter {
         by: actorId,
         isUser: false,
         senderTitle,
-        senderRuntime: actorId,
+        senderRuntime: provider,
         to: ['user'],
         insight: `💬 阶段进展 · ${senderTitle}`,
         text: cleanMid,
         ok: true,
         thoughtTrace: Array.isArray(midTrace) ? midTrace : [],
         sessionReceipt: {
-          agent: actorId,
+          slotId: actorId,
+          agent: provider,
+          role: slotCfg.role || 'peer',
           mode: agentCfg.mode,
           sessionId: midSid || effectiveSessionId || '',
           sessionTitle: resolvedSessionTitle,
@@ -3546,7 +3738,8 @@ export class CcccBridge extends EventEmitter {
 
     try {
       const result = await this.externalSessionRunnerFn({
-        agent: actorId,
+        agent: provider,
+        slotId: actorId,
         phase,
         mode: effectiveMode,
         sessionId: effectiveSessionId,
@@ -3570,7 +3763,7 @@ export class CcccBridge extends EventEmitter {
 
       // Auto-bind newly created or companion-forked session so subsequent messages continue in that exact writable session!
       if (
-        phase === 'exec' &&
+        (phase === 'exec' || phase === 'rework') &&
         (agentCfg.mode === 'new' || result?.forkedFromSessionId) &&
         result?.ok &&
         result.sessionId &&
@@ -3579,15 +3772,32 @@ export class CcccBridge extends EventEmitter {
         const curPrefs = this.groupPrefs[groupId] || {};
         const curRouting = normalizeSessionRouting(curPrefs.sessionRouting, targetGroup.scopePath);
         const folderBase = effectiveCwd ? path.basename(effectiveCwd) : '项目';
-        curRouting[actorId] = {
-          mode: 'existing',
-          sessionId: result.sessionId,
-          sessionTitle: agentCfg.sessionTitle || `${folderBase} 新建会话`,
-          cwd: effectiveCwd,
-        };
+        const autoBoundTitle = agentCfg.sessionTitle || `${folderBase} 新建会话`;
+        if (Array.isArray(curRouting.slots)) {
+          curRouting.slots = curRouting.slots.map((s) =>
+            s.slotId === actorId
+              ? {
+                  ...s,
+                  mode: 'existing',
+                  sessionId: result.sessionId,
+                  sessionTitle: autoBoundTitle,
+                  cwd: effectiveCwd,
+                }
+              : s
+          );
+        }
+        if (actorId === provider || !curRouting[provider]?.sessionId) {
+          curRouting[provider] = {
+            mode: 'existing',
+            sessionId: result.sessionId,
+            sessionTitle: autoBoundTitle,
+            cwd: effectiveCwd,
+          };
+        }
+        const savedRouting = normalizeSessionRouting(curRouting, targetGroup.scopePath);
         this.groupPrefs[groupId] = {
           ...curPrefs,
-          sessionRouting: curRouting,
+          sessionRouting: savedRouting,
         };
         await this.saveGroupPrefs();
         this.externalSessionCache.ts = 0;
@@ -3599,19 +3809,27 @@ export class CcccBridge extends EventEmitter {
 
       const rawText = String(result?.text || '');
       const parsedSteps = parseIdeStepsFromText(rawText);
+      const validCollabTargets = Array.isArray(routing?.slots) ? routing.slots : [];
       const collabSignal =
-        result?.ok !== false ? parseCollabSignal(rawText, { fromActor: actorId }) : null;
+        result?.ok !== false
+          ? parseCollabSignal(rawText, { fromActor: actorId, validTargets: validCollabTargets })
+          : null;
+      const reviewVerdict =
+        phase === 'lead_review' && result?.ok !== false
+          ? parseReviewVerdict(rawText, { validTargets: validCollabTargets })
+          : null;
       const cleanText = stripIdeProtocolTags(rawText) || collabSignal?.message || rawText;
       const resolvedSid = result?.sessionId || effectiveSessionId || '';
 
       if (!this.cancelledExternalGroups.has(groupId)) {
         const curBoardActor = this.ideBoards.get(groupId)?.actors?.[actorId];
+        const isTerminalSuccessPhase = phase === 'exec' || phase === 'rework' || phase === 'lead_review';
         const nextSteps =
           parsedSteps.length > 0
             ? parsedSteps
             : Array.isArray(curBoardActor?.steps)
               ? curBoardActor.steps.map((s) =>
-                  result?.ok !== false && phase === 'exec' && !collabSignal && s.status === 'active'
+                  result?.ok !== false && isTerminalSuccessPhase && !collabSignal && s.status === 'active'
                     ? { ...s, status: 'done' }
                     : s
                 )
@@ -3631,11 +3849,18 @@ export class CcccBridge extends EventEmitter {
           boardPatch.phase = 'error';
           boardPatch.phaseLabel = PHASE_LABELS.error;
           boardPatch.currentAction = cleanText.replace(/\s+/g, ' ').slice(0, 96) || '执行中断';
-        } else if (phase === 'exec') {
+        } else if (isTerminalSuccessPhase) {
           boardPatch.phase = 'done';
           boardPatch.phaseLabel = PHASE_LABELS.done;
           boardPatch.completedAt = new Date().toISOString();
-          boardPatch.currentAction = '✓ 当前 IDE 分工已完成';
+          boardPatch.currentAction =
+            phase === 'lead_review'
+              ? reviewVerdict?.approved === false
+                ? '⚠ 审查退回返修中'
+                : '✓ 主审验收完成'
+              : phase === 'rework'
+                ? '✓ 按审返修完成'
+                : '✓ 当前 IDE 分工已完成';
         } else {
           boardPatch.currentAction =
             phase === 'collab_sync' ? '🤝 已完成回群协作答复' : '✓ 群内分工已确认';
@@ -3652,9 +3877,14 @@ export class CcccBridge extends EventEmitter {
         rawText,
         parsedSteps,
         collabSignal,
+        reviewVerdict,
         actorTitle: senderTitle,
+        provider,
+        role: slotCfg.role || 'peer',
         sessionReceipt: {
-          agent: actorId,
+          slotId: actorId,
+          agent: provider,
+          role: slotCfg.role || 'peer',
           mode: agentCfg.mode,
           sessionId: resolvedSid,
           sessionTitle: resolvedSessionTitle,
@@ -3718,12 +3948,18 @@ export class CcccBridge extends EventEmitter {
     userTaskText = '',
     attachments = [],
     replyStyle = 'plain',
+    phase = 'exec',
     maxDisconnectWakeups = 3,
     maxPhaseContinuations = 2,
   }) {
     const autoWakeEnabled = routing?.autoWake !== false;
+    const slotMeta = resolveRoutingSlot(routing, actorId);
+    const actorLabel =
+      slotMeta?.label ||
+      (actorId === 'codex' ? 'Codex' : actorId === 'antigravity' ? 'Antigravity' : actorId);
     let currentRouting = {
       ...routing,
+      slots: Array.isArray(routing?.slots) ? routing.slots.map((s) => ({ ...s })) : undefined,
       [actorId]: { ...(routing[actorId] || {}) },
     };
 
@@ -3739,7 +3975,7 @@ export class CcccBridge extends EventEmitter {
           prompt: activePrompt,
           attachments,
           replyStyle,
-          phase: 'exec',
+          phase,
         });
         if (this.cancelledExternalGroups.has(groupId)) return res;
 
@@ -3747,6 +3983,18 @@ export class CcccBridge extends EventEmitter {
         if (resolvedSid) {
           currentRouting = {
             ...currentRouting,
+            slots: Array.isArray(currentRouting.slots)
+              ? currentRouting.slots.map((s) =>
+                  s.slotId === actorId
+                    ? {
+                        ...s,
+                        mode: 'existing',
+                        sessionId: resolvedSid,
+                        cwd: s.cwd || targetGroup.scopePath || '',
+                      }
+                    : s
+                )
+              : undefined,
             [actorId]: {
               ...(currentRouting[actorId] || {}),
               mode: 'existing',
@@ -3770,7 +4018,6 @@ export class CcccBridge extends EventEmitter {
         }
 
         disconnectWakeCount += 1;
-        const actorLabel = actorId === 'codex' ? 'Codex' : 'Antigravity';
         this.setExternalActorThinking(
           groupId,
           actorId,
@@ -3799,7 +4046,7 @@ export class CcccBridge extends EventEmitter {
         by: actorId,
         isUser: false,
         senderTitle: currentRes.actorTitle,
-        senderRuntime: actorId,
+        senderRuntime: currentRes.provider || actorId,
         to: ['user'],
         insight:
           phaseContinuationCount === 0
@@ -3820,7 +4067,6 @@ export class CcccBridge extends EventEmitter {
       });
 
       phaseContinuationCount += 1;
-      const actorLabel = actorId === 'codex' ? 'Codex' : 'Antigravity';
       this.setExternalActorThinking(
         groupId,
         actorId,
@@ -3850,6 +4096,7 @@ export class CcccBridge extends EventEmitter {
     replyStyle,
     routing,
     followUp = false,
+    isBroadcastAll = false,
   }) {
     this.cancelledExternalGroups.delete(groupId);
     const { cleanText: userPromptOnly, attachments } = parseMessageAttachments(
@@ -3858,27 +4105,45 @@ export class CcccBridge extends EventEmitter {
     );
     const promptBody = userPromptOnly || cleanText;
 
-    const targetLabels = recipients.map((r) => {
-      const cfg = routing[r] || {};
-      if (cfg.mode === 'existing' && cfg.sessionId) {
-        return `${r === 'codex' ? 'Codex' : 'Antigravity'} → ${cfg.sessionTitle || cfg.sessionId.slice(0, 8)}`;
+    const participatingSlots = [];
+    const seenSlotIds = new Set();
+    for (const r of recipients || []) {
+      const slot = resolveRoutingSlot(routing, r) || {
+        slotId: r,
+        provider: r === 'codex' ? 'codex' : 'antigravity',
+        label: r === 'codex' ? 'Codex' : r === 'antigravity' ? 'Antigravity' : r,
+        role: 'peer',
+        ...(routing?.[r] || { mode: 'group', sessionId: '', sessionTitle: '', cwd: '' }),
+      };
+      if (seenSlotIds.has(slot.slotId)) continue;
+      seenSlotIds.add(slot.slotId);
+      participatingSlots.push(slot);
+    }
+
+    const findSlot = (id) => participatingSlots.find((s) => s.slotId === id) || resolveRoutingSlot(routing, id);
+    const formatSlotLabel = (slot) => {
+      if (!slot) return '';
+      if (slot.mode === 'existing' && slot.sessionId) {
+        return `${slot.label} → ${slot.sessionTitle || slot.sessionId.slice(0, 8)}`;
       }
-      if (cfg.mode === 'new') {
-        const base = path.basename(cfg.cwd || targetGroup.scopePath || '项目目录');
-        return `${r === 'codex' ? 'Codex' : 'Antigravity'} → ➕新建(${base})`;
+      if (slot.mode === 'new') {
+        const base = path.basename(slot.cwd || targetGroup.scopePath || '项目目录');
+        return `${slot.label} → ➕新建(${base})`;
       }
-      return `${r === 'codex' ? 'Codex' : 'Antigravity'} → 本群会话`;
-    });
+      return `${slot.label} → 本群会话`;
+    };
+    const targetLabels = participatingSlots.map(formatSlotLabel);
 
     const isFollowUpTurn = Boolean(followUp);
     const effectiveFlow = isFollowUpTurn ? 'direct' : routing.flow;
+    const recipientSlotIds = participatingSlots.map((s) => s.slotId);
 
     const userRecord = await this.appendExternalDispatchMessage(groupId, {
       by: 'user',
       isUser: true,
       senderTitle: '我',
       senderRuntime: 'user',
-      to: recipients,
+      to: recipientSlotIds,
       mode: 'send',
       insight: isFollowUpTurn
         ? `➕ 补充跟进 · ${targetLabels.join(' | ')}`
@@ -3893,6 +4158,16 @@ export class CcccBridge extends EventEmitter {
       .trim()
       .slice(0, 88);
 
+    const leadSlot = participatingSlots.find((s) => s.role === 'lead') || null;
+    const workerSlots = leadSlot
+      ? participatingSlots.filter((s) => s.slotId !== leadSlot.slotId)
+      : participatingSlots;
+    const isLeadSupervisedFlow = Boolean(leadSlot && workerSlots.length >= 1 && !isFollowUpTurn && isBroadcastAll);
+    const isLegacyTwoPeerFlow =
+      !isLeadSupervisedFlow &&
+      participatingSlots.length === 2 &&
+      participatingSlots.every((s) => s.slotId === 'codex' || s.slotId === 'antigravity');
+
     const runWorkflowAsync = async () => {
       try {
         this.ensureGroupIdeBoard(groupId, {
@@ -3902,147 +4177,238 @@ export class CcccBridge extends EventEmitter {
               ? '🤝 正在群内沟通对齐方案与分工…'
               : isFollowUpTurn
                 ? '➕ 正在 IDE 会话跟进补充信息…'
-                : '🚀 正在派发至目标 IDE 会话执行…',
+                : isLeadSupervisedFlow
+                  ? `🚀 ${workerSlots.length} 个子会话并行执行中（完成后由 ${leadSlot.label} 验收）`
+                  : '🚀 正在派发至目标 IDE 会话执行…',
           round: 1,
           reset: !isFollowUpTurn,
+          slots: participatingSlots,
         });
 
         let alignmentSummary = '';
-        const execTargets =
-          effectiveFlow === 'discuss_then_exec'
-            ? recipients.length >= 2
-              ? recipients
-              : ['codex', 'antigravity']
-            : recipients;
+        let execSlots = isLeadSupervisedFlow ? workerSlots : participatingSlots;
+        if (isLegacyTwoPeerFlow && effectiveFlow === 'discuss_then_exec' && execSlots.length < 2) {
+          execSlots = [
+            resolveRoutingSlot(routing, 'codex') || { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'peer' },
+            resolveRoutingSlot(routing, 'antigravity') || {
+              slotId: 'antigravity',
+              provider: 'antigravity',
+              label: 'Antigravity',
+              role: 'peer',
+            },
+          ];
+        }
+        const execTargets = execSlots.map((s) => s.slotId);
 
-        if (effectiveFlow === 'discuss_then_exec') {
-          // Stage 1: Codex drafts concise alignment + initial steps
-          this.setExternalActorThinking(groupId, 'codex', '🤝 正在群内拟定简洁分工方案…');
-          this.emit('relay', {
-            groupId,
-            active: true,
-            step: 1,
-            text: '🤝 群内对齐 1/3：Codex 正在拟定分工方案…',
-          });
+        if (effectiveFlow === 'discuss_then_exec' && participatingSlots.length >= 2) {
+          if (isLeadSupervisedFlow || !isLegacyTwoPeerFlow) {
+            // Multi-session / Lead-supervised alignment: Lead (or first slot)拆解无重叠分工并写入所有子会话看板
+            const plannerSlot = leadSlot || participatingSlots[0];
+            const planTargetSlots = isLeadSupervisedFlow ? workerSlots : participatingSlots;
+            const roleSpecLines = planTargetSlots.map(
+              (s) => `- ${s.label} (${s.slotId}) 负责：...`
+            );
 
-          const leadRes = await this.runTargetSessionForActor({
-            groupId,
-            targetGroup,
-            actorId: 'codex',
-            routing,
-            prompt: `用户布置了双 Agent 协作任务：\n\n${promptBody}\n\n【第 1 步：群内快速沟通（只出思路与分工，先不改文件）】：\n请用简明清晰的语言说明核心思路，并严格按行写清分工：\n- Codex 负责：...\n- Antigravity 负责：...\n- 协作同步点：什么情况下需要回到群里跟同伴沟通\n并在回答末尾另起一行附带初始步骤清单（仅供顶部 IDE 看板渲染，用户看不见此标签）：\n<!--achat-steps:[{"title":"步骤1","status":"pending"},{"title":"步骤2","status":"pending"}]-->`,
-            attachments,
-            replyStyle,
-            phase: 'discuss_lead',
-            forcePermission: 'read-only',
-          });
-          this.setExternalActorThinking(groupId, 'codex', '');
-          if (this.cancelledExternalGroups.has(groupId)) return;
+            this.setExternalActorThinking(groupId, plannerSlot.slotId, '🤝 正在群内拆解无重叠分工…');
+            this.emit('relay', {
+              groupId,
+              active: true,
+              step: 1,
+              text: `🤝 群内拆解：${plannerSlot.label} 正在为 ${planTargetSlots.length} 个会话分配任务…`,
+            });
 
-          await this.appendExternalDispatchMessage(groupId, {
-            by: 'codex',
-            isUser: false,
-            senderTitle: leadRes.actorTitle || 'Codex',
-            senderRuntime: 'codex',
-            to: ['antigravity', 'user'],
-            insight: '🤝 群内沟通 · 分工提案',
-            text: leadRes.text,
-            thoughtTrace: leadRes.thoughtTrace,
-          });
+            const leadRes = await this.runTargetSessionForActor({
+              groupId,
+              targetGroup,
+              actorId: plannerSlot.slotId,
+              routing,
+              prompt: `用户布置了多会话协作任务（共 ${participatingSlots.length} 个会话参与，其中 ${leadSlot ? `${leadSlot.label} 负责统筹分析与最终审查验收` : '各会话平级分工并行'}）：\n\n${promptBody}\n\n【第 1 步：群内快速分工（只出无重叠分工方案，先不改文件）】：\n请用简明语言写清思路，并严格按以下行格式写清每个执行会话的职责边界与同步点：\n${roleSpecLines.join('\n')}\n- 协作与验收要点：...\n并在回答末尾另起一行附带初始步骤清单（仅供顶部 IDE 看板渲染，用户看不见此标签）：\n<!--achat-steps:[{"title":"拆解多会话分工","status":"done"},{"title":"等待子会话执行并验收","status":"pending"}]-->`,
+              attachments,
+              replyStyle,
+              phase: 'discuss_lead',
+              forcePermission: 'read-only',
+            });
+            this.setExternalActorThinking(groupId, plannerSlot.slotId, '');
+            if (this.cancelledExternalGroups.has(groupId)) return;
 
-          for (const actorKey of ['codex', 'antigravity']) {
-            const sub = extractActorSubtaskHint(leadRes.text, actorKey);
-            if (sub || leadRes.parsedSteps?.length) {
-              this.updateActorIdeBoardState(groupId, actorKey, {
-                ...(sub ? { subtask: sub } : {}),
-                ...(leadRes.parsedSteps?.length ? { steps: leadRes.parsedSteps } : {}),
+            await this.appendExternalDispatchMessage(groupId, {
+              by: plannerSlot.slotId,
+              isUser: false,
+              senderTitle: leadRes.actorTitle || plannerSlot.label,
+              senderRuntime: plannerSlot.provider,
+              to: [...planTargetSlots.map((s) => s.slotId), 'user'],
+              insight: '🤝 群内分工 · 任务拆解',
+              text: leadRes.text,
+              thoughtTrace: leadRes.thoughtTrace,
+              sessionReceipt: leadRes.sessionReceipt,
+            });
+
+            for (const s of participatingSlots) {
+              const sub = extractActorSubtaskHint(leadRes.text, s.slotId, s.label);
+              if (sub || (s.slotId === plannerSlot.slotId && leadRes.parsedSteps?.length)) {
+                this.updateActorIdeBoardState(groupId, s.slotId, {
+                  ...(sub ? { subtask: sub } : {}),
+                  ...(s.slotId === plannerSlot.slotId && leadRes.parsedSteps?.length
+                    ? { steps: leadRes.parsedSteps }
+                    : {}),
+                });
+              }
+            }
+            if (leadSlot) {
+              this.updateActorIdeBoardState(groupId, leadSlot.slotId, {
+                phase: 'idle',
+                phaseLabel: '待验收',
+                currentAction: '等待子会话产出后执行审查验收',
               });
             }
-          }
 
-          // Stage 2: Antigravity reviews & locks final division of labor
-          this.setExternalActorThinking(groupId, 'antigravity', '🤝 正在复核并拍板分工…');
-          this.emit('relay', {
-            groupId,
-            active: true,
-            step: 2,
-            text: '🤝 群内对齐 2/3：Antigravity 正在确认分工并准备派往 IDE…',
-          });
+            alignmentSummary = `--- ${plannerSlot.label} 分工拆解 ---\n${leadRes.text}`;
+            await this.appendExternalDispatchMessage(groupId, {
+              kind: 'system',
+              by: 'system',
+              text: `🚀 分工已确认，正并行派发给 ${planTargetSlots.map((s) => s.label).join('、')}`,
+            });
+          } else {
+            // Legacy 2-slot Peer alignment (Codex + Antigravity)
+            this.setExternalActorThinking(groupId, 'codex', '🤝 正在群内拟定简洁分工方案…');
+            this.emit('relay', {
+              groupId,
+              active: true,
+              step: 1,
+              text: '🤝 群内对齐 1/3：Codex 正在拟定分工方案…',
+            });
 
-          const peerRes = await this.runTargetSessionForActor({
-            groupId,
-            targetGroup,
-            actorId: 'antigravity',
-            routing,
-            prompt: `用户任务：\n${promptBody}\n\nCodex 在群里的分工提案：\n${leadRes.text}\n\n【第 2 步：拍板分工（保持简短，确认后系统将分别派入你们各自的 IDE 会话执行）】：\n请补充确认关键边界与协作节点，明确写清：\n- Codex 负责：...\n- Antigravity 负责：...\n并在末尾附带确认后的步骤标签：\n<!--achat-steps:[{"title":"步骤1","status":"pending"},{"title":"步骤2","status":"pending"}]-->`,
-            attachments,
-            replyStyle,
-            phase: 'discuss_peer',
-            forcePermission: 'read-only',
-          });
-          this.setExternalActorThinking(groupId, 'antigravity', '');
-          if (this.cancelledExternalGroups.has(groupId)) return;
+            const leadRes = await this.runTargetSessionForActor({
+              groupId,
+              targetGroup,
+              actorId: 'codex',
+              routing,
+              prompt: `用户布置了双 Agent 协作任务：\n\n${promptBody}\n\n【第 1 步：群内快速沟通（只出思路与分工，先不改文件）】：\n请用简明清晰的语言说明核心思路，并严格按行写清分工：\n- Codex 负责：...\n- Antigravity 负责：...\n- 协作同步点：什么情况下需要回到群里跟同伴沟通\n并在回答末尾另起一行附带初始步骤清单（仅供顶部 IDE 看板渲染，用户看不见此标签）：\n<!--achat-steps:[{"title":"步骤1","status":"pending"},{"title":"步骤2","status":"pending"}]-->`,
+              attachments,
+              replyStyle,
+              phase: 'discuss_lead',
+              forcePermission: 'read-only',
+            });
+            this.setExternalActorThinking(groupId, 'codex', '');
+            if (this.cancelledExternalGroups.has(groupId)) return;
 
-          await this.appendExternalDispatchMessage(groupId, {
-            by: 'antigravity',
-            isUser: false,
-            senderTitle: peerRes.actorTitle || 'Antigravity',
-            senderRuntime: 'antigravity',
-            to: ['codex', 'user'],
-            insight: '🤝 群内沟通 · 拍板确认',
-            text: peerRes.text,
-            thoughtTrace: peerRes.thoughtTrace,
-          });
+            await this.appendExternalDispatchMessage(groupId, {
+              by: 'codex',
+              isUser: false,
+              senderTitle: leadRes.actorTitle || 'Codex',
+              senderRuntime: 'codex',
+              to: ['antigravity', 'user'],
+              insight: '🤝 群内沟通 · 分工提案',
+              text: leadRes.text,
+              thoughtTrace: leadRes.thoughtTrace,
+            });
 
-          for (const actorKey of ['codex', 'antigravity']) {
-            const sub =
-              extractActorSubtaskHint(peerRes.text, actorKey) ||
-              extractActorSubtaskHint(leadRes.text, actorKey);
-            if (sub || peerRes.parsedSteps?.length) {
-              this.updateActorIdeBoardState(groupId, actorKey, {
-                ...(sub ? { subtask: sub } : {}),
-                ...(peerRes.parsedSteps?.length ? { steps: peerRes.parsedSteps } : {}),
-              });
+            for (const actorKey of ['codex', 'antigravity']) {
+              const sub = extractActorSubtaskHint(leadRes.text, actorKey);
+              if (sub || leadRes.parsedSteps?.length) {
+                this.updateActorIdeBoardState(groupId, actorKey, {
+                  ...(sub ? { subtask: sub } : {}),
+                  ...(leadRes.parsedSteps?.length ? { steps: leadRes.parsedSteps } : {}),
+                });
+              }
             }
+
+            this.setExternalActorThinking(groupId, 'antigravity', '🤝 正在复核并拍板分工…');
+            this.emit('relay', {
+              groupId,
+              active: true,
+              step: 2,
+              text: '🤝 群内对齐 2/3：Antigravity 正在确认分工并准备派往 IDE…',
+            });
+
+            const peerRes = await this.runTargetSessionForActor({
+              groupId,
+              targetGroup,
+              actorId: 'antigravity',
+              routing,
+              prompt: `用户任务：\n${promptBody}\n\nCodex 在群里的分工提案：\n${leadRes.text}\n\n【第 2 步：拍板分工（保持简短，确认后系统将分别派入你们各自的 IDE 会话执行）】：\n请补充确认关键边界与协作节点，明确写清：\n- Codex 负责：...\n- Antigravity 负责：...\n并在末尾附带确认后的步骤标签：\n<!--achat-steps:[{"title":"步骤1","status":"pending"},{"title":"步骤2","status":"pending"}]-->`,
+              attachments,
+              replyStyle,
+              phase: 'discuss_peer',
+              forcePermission: 'read-only',
+            });
+            this.setExternalActorThinking(groupId, 'antigravity', '');
+            if (this.cancelledExternalGroups.has(groupId)) return;
+
+            await this.appendExternalDispatchMessage(groupId, {
+              by: 'antigravity',
+              isUser: false,
+              senderTitle: peerRes.actorTitle || 'Antigravity',
+              senderRuntime: 'antigravity',
+              to: ['codex', 'user'],
+              insight: '🤝 群内沟通 · 拍板确认',
+              text: peerRes.text,
+              thoughtTrace: peerRes.thoughtTrace,
+            });
+
+            for (const actorKey of ['codex', 'antigravity']) {
+              const sub =
+                extractActorSubtaskHint(peerRes.text, actorKey) ||
+                extractActorSubtaskHint(leadRes.text, actorKey);
+              if (sub || peerRes.parsedSteps?.length) {
+                this.updateActorIdeBoardState(groupId, actorKey, {
+                  ...(sub ? { subtask: sub } : {}),
+                  ...(peerRes.parsedSteps?.length ? { steps: peerRes.parsedSteps } : {}),
+                });
+              }
+            }
+
+            alignmentSummary = `--- Codex 提案 ---\n${leadRes.text}\n--- Antigravity 拍板 ---\n${peerRes.text}`;
+
+            await this.appendExternalDispatchMessage(groupId, {
+              kind: 'system',
+              by: 'system',
+              text: `🚀 群内已对齐，正在分别派入对应 IDE 会话执行（${targetLabels.join(' · ')}）`,
+            });
           }
-
-          alignmentSummary = `--- Codex 提案 ---\n${leadRes.text}\n--- Antigravity 拍板 ---\n${peerRes.text}`;
-
-          await this.appendExternalDispatchMessage(groupId, {
-            kind: 'system',
-            by: 'system',
-            text: `🚀 群内已对齐，正在分别派入对应 IDE 会话执行（${targetLabels.join(' · ')}）`,
+        } else if (isLeadSupervisedFlow) {
+          this.updateActorIdeBoardState(groupId, leadSlot.slotId, {
+            phase: 'idle',
+            phaseLabel: '待验收',
+            currentAction: '等待子会话产出后执行审查验收',
           });
         }
 
         const buildIdeProtocolSuffix = (actorKey) => {
-          const peerKey = actorKey === 'codex' ? 'antigravity' : 'codex';
+          const allOthers = participatingSlots.filter((s) => s.slotId !== actorKey);
+          const defaultPeer = allOthers[0]?.slotId || (actorKey === 'codex' ? 'antigravity' : 'codex');
           const lines = [
             '【顶部 IDE 进度看板同步规则】：',
             '在回复末尾（或分段推进时）维护一句步骤清单标签（用户界面会自动转为 IDE 进度条）：',
             '<!--achat-steps:[{"title":"关键步骤1","status":"done"},{"title":"关键步骤2","status":"active"}]-->',
             '（思考与工具调用轨迹会自动实时同步到顶部 IDE 看板；聊天最终回复请保持精炼结论，不必写长篇流水账。）',
           ];
-          if (execTargets.length >= 2) {
+          if (participatingSlots.length >= 2) {
+            const targetHint =
+              allOthers.length > 1
+                ? allOthers.map((o) => `${o.slotId}(${o.label})`).join(' / ')
+                : defaultPeer;
             lines.push(
               '',
-              `【回群协作规则】：在 IDE 会话执行过程中，如果你完成了前置依赖、发现与 @${peerKey} 相关的分歧/接口问题、或需要同伴验证接力，请在回复末尾附带一行协作信号：`,
-              `<!--achat-collab:{"needCollab":true,"to":"${peerKey}","reason":"一句话原因","message":"回到 AChat 群里要对同伴说的具体沟通内容"}-->`,
-              '附带该信号后，系统会立即把你和同伴带回 AChat 群聊完成沟通，再派回 IDE 继续推进。'
+              `【回群协作规则】：在 IDE 会话执行过程中，如果你完成了前置依赖、发现与其他会话（${targetHint}）相关的分歧/接口问题、或需要同伴验证接力，请在回复末尾附带一行协作信号：`,
+              `<!--achat-collab:{"needCollab":true,"to":"${defaultPeer}","reason":"一句话原因","message":"回到 AChat 群里要对同伴说的具体沟通内容"}-->`,
+              '附带该信号后，系统会立即把你和目标会话带回 AChat 群聊完成沟通，再派回 IDE 继续推进。'
             );
           }
           return lines.join('\n');
         };
 
-        const runParallelIdeWave = async (waveActors, waveRound, buildPromptForActor) => {
+        const runParallelIdeWave = async (waveActors, waveRound, buildPromptForActor, wavePhase = 'exec') => {
           const stageMsg =
-            waveRound > 1
-              ? `🚀 第 ${waveRound} 轮派单：已按群内新共识派回各自 IDE 会话执行…`
-              : effectiveFlow === 'discuss_then_exec'
-                ? `🚀 派单执行：已在各自目标 IDE 会话并行推进（${targetLabels.join(' · ')}）…`
-                : isFollowUpTurn
-                  ? `➕ 已在同会话跟进补充信息（${targetLabels.join(' · ')}）…`
-                  : `🎯 已直达目标 IDE 会话执行（${targetLabels.join(' · ')}）…`;
+            wavePhase === 'rework'
+              ? `🛠️ 第 ${waveRound} 轮按审返修：已把 ${leadSlot?.label || '主审'} 意见派回对应子会话…`
+              : waveRound > 1
+                ? `🚀 第 ${waveRound} 轮派单：已按群内新共识派回各自 IDE 会话执行…`
+                : effectiveFlow === 'discuss_then_exec'
+                  ? `🚀 派单执行：已在各自目标 IDE 会话并行推进（${targetLabels.join(' · ')}）…`
+                  : isFollowUpTurn
+                    ? `➕ 已在同会话跟进补充信息（${targetLabels.join(' · ')}）…`
+                    : `🎯 已直达目标 IDE 会话执行（${waveActors.map((id) => findSlot(id)?.label || id).join(' · ')}）…`;
 
           this.ensureGroupIdeBoard(groupId, {
             stageText: stageMsg,
@@ -4059,41 +4425,55 @@ export class CcccBridge extends EventEmitter {
             this.setExternalActorThinking(
               groupId,
               actorKey,
-              waveRound > 1
-                ? `🚀 第 ${waveRound} 轮：正在目标 IDE 会话继续推进…`
-                : isFollowUpTurn
-                  ? '➕ 正在同会话跟进补充信息…'
-                  : '🚀 正在目标 IDE 会话执行任务…'
+              wavePhase === 'rework'
+                ? `🛠️ 正在按主审验收意见返修（第 ${waveRound} 轮）…`
+                : waveRound > 1
+                  ? `🚀 第 ${waveRound} 轮：正在目标 IDE 会话继续推进…`
+                  : isFollowUpTurn
+                    ? '➕ 正在同会话跟进补充信息…'
+                    : '🚀 正在目标 IDE 会话执行任务…'
             );
           }
 
-          return Promise.all(
-            waveActors.map(async (r) => {
-              try {
-                const fullActorPrompt = buildPromptForActor(r);
-                const res = await this.executeActorWithAutoWake({
-                  groupId,
-                  targetGroup,
-                  actorId: r,
-                  routing,
-                  initialPrompt: fullActorPrompt,
-                  userTaskText: promptBody,
-                  attachments,
-                  replyStyle,
-                });
-                if (this.cancelledExternalGroups.has(groupId)) return { actorId: r, res, cancelled: true };
+          // Group by target session key so duplicate bindings to one existing session serialize cleanly instead of racing locks
+          const laneGroups = new Map();
+          for (const r of waveActors) {
+            const s = findSlot(r);
+            const laneKey =
+              s?.mode === 'existing' && s.sessionId ? `${s.provider}:${s.sessionId}` : `unique:${r}`;
+            if (!laneGroups.has(laneKey)) laneGroups.set(laneKey, []);
+            laneGroups.get(laneKey).push(r);
+          }
 
-                const collabReq = res?.ok !== false ? res?.collabSignal : null;
-                const msgTo = collabReq?.to && collabReq.to !== 'all' ? [collabReq.to, 'user'] : ['user'];
-                const msgText = collabReq?.message
-                  ? res.text && res.text.includes(collabReq.message)
-                    ? res.text
-                    : res.text
-                      ? `${res.text}\n\n🤝 回群协作说明：${collabReq.message}`
-                      : collabReq.message
-                  : res.text;
-                const insightText = collabReq
-                  ? `🤝 回群请求协作（第${waveRound}轮）· ${collabReq.reason}`
+          const executeSingleSlot = async (r) => {
+            try {
+              const fullActorPrompt = buildPromptForActor(r);
+              const res = await this.executeActorWithAutoWake({
+                groupId,
+                targetGroup,
+                actorId: r,
+                routing,
+                initialPrompt: fullActorPrompt,
+                userTaskText: promptBody,
+                attachments,
+                replyStyle,
+                phase: wavePhase,
+              });
+              if (this.cancelledExternalGroups.has(groupId)) return { actorId: r, res, cancelled: true };
+
+              const collabReq = res?.ok !== false ? res?.collabSignal : null;
+              const msgTo = collabReq?.to && collabReq.to !== 'all' ? [collabReq.to, 'user'] : ['user'];
+              const msgText = collabReq?.message
+                ? res.text && res.text.includes(collabReq.message)
+                  ? res.text
+                  : res.text
+                    ? `${res.text}\n\n🤝 回群协作说明：${collabReq.message}`
+                    : collabReq.message
+                : res.text;
+              const insightText = collabReq
+                ? `🤝 回群请求协作（第${waveRound}轮）· ${collabReq.reason}`
+                : wavePhase === 'rework'
+                  ? `🛠️ 按审返修汇报 · ${res.actorTitle}`
                   : res.stageTag ||
                     (res.disconnectWakeCount > 0
                       ? `⏰ 自动唤醒续跑成功 (${res.disconnectWakeCount}次)`
@@ -4101,61 +4481,102 @@ export class CcccBridge extends EventEmitter {
                         ? `🚀 第 ${waveRound} 轮 IDE 执行汇报`
                         : '');
 
-                await this.appendExternalDispatchMessage(groupId, {
-                  by: r,
-                  isUser: false,
-                  senderTitle: res.actorTitle,
-                  senderRuntime: r,
-                  to: msgTo,
-                  insight: insightText,
-                  text: msgText,
-                  ok: res.ok !== false,
-                  thoughtTrace: res.thoughtTrace,
-                  sessionReceipt: res.sessionReceipt,
-                  retryMeta: {
-                    actorId: r,
-                    prompt: fullActorPrompt.slice(0, 6000),
-                    replyStyle,
-                    attachments,
-                  },
-                });
-                return { actorId: r, res };
-              } finally {
-                this.setExternalActorThinking(groupId, r, '');
+              await this.appendExternalDispatchMessage(groupId, {
+                by: r,
+                isUser: false,
+                senderTitle: res.actorTitle,
+                senderRuntime: res.provider || r,
+                to: msgTo,
+                insight: insightText,
+                text: msgText,
+                ok: res.ok !== false,
+                thoughtTrace: res.thoughtTrace,
+                sessionReceipt: res.sessionReceipt,
+                retryMeta: {
+                  actorId: r,
+                  prompt: fullActorPrompt.slice(0, 6000),
+                  replyStyle,
+                  attachments,
+                },
+              });
+              return { actorId: r, res };
+            } finally {
+              this.setExternalActorThinking(groupId, r, '');
+            }
+          };
+
+          const laneResults = await Promise.all(
+            Array.from(laneGroups.values()).map(async (laneSlots) => {
+              const out = [];
+              for (const slotId of laneSlots) {
+                out.push(await executeSingleSlot(slotId));
               }
+              return out;
             })
           );
+          const resultByActor = new Map();
+          for (const arr of laneResults) {
+            for (const item of arr) {
+              if (item?.actorId) resultByActor.set(item.actorId, item);
+            }
+          }
+          return waveActors.map((id) => resultByActor.get(id)).filter(Boolean);
         };
 
         let collabRound = 1;
+        const workerOutputBySlot = new Map();
+        const recordWaveOutputs = (results = []) => {
+          for (const item of results) {
+            if (item?.actorId && !item.cancelled) {
+              workerOutputBySlot.set(item.actorId, item.res);
+            }
+          }
+        };
+
         let latestWaveResults = await runParallelIdeWave(execTargets, collabRound, (r) => {
-          if (effectiveFlow === 'discuss_then_exec') {
-            const roleLabel = r === 'codex' ? 'Codex' : 'Antigravity';
-            return `【AChat 跨会话正式派单】\n用户原始任务：\n${promptBody}\n\n双方在群内商量拍板的分工方案：\n${alignmentSummary}\n\n请现在立即在当前目标 IDE 会话中执行属于「${roleLabel}」的部分（遵守分工边界），完成后给出精简结论与下一步。\n\n${buildIdeProtocolSuffix(r)}`;
+          const slotObj = findSlot(r);
+          const roleLabel = slotObj?.label || (r === 'codex' ? 'Codex' : 'Antigravity');
+          if (effectiveFlow === 'discuss_then_exec' && alignmentSummary) {
+            return `【AChat 跨会话正式派单】\n用户原始任务：\n${promptBody}\n\n群内刚对齐拍板的分工方案：\n${alignmentSummary}\n\n请现在立即在当前目标 IDE 会话中执行属于「${roleLabel}」的部分（遵守分工边界），完成后给出精简结论与下一步。\n\n${buildIdeProtocolSuffix(r)}`;
           }
           const followUpPrefix = isFollowUpTurn
             ? '【用户追加补充信息（请结合当前会话正在进行的任务与上下文直接跟进处理，无需重新走分工提案）】：\n'
             : '';
+          const otherNames = participatingSlots
+            .filter((s) => s.slotId !== r)
+            .map((s) => `${s.label}(@${s.slotId})`)
+            .join('、');
           const peerNote =
-            execTargets.length > 1
-              ? `\n\n【协作提示：本任务同时派发给了 ${execTargets.join(' 与 ')}，请专注处理属于你的部分并清晰汇报结果。】`
+            participatingSlots.length > 1
+              ? isLeadSupervisedFlow
+                ? `\n\n【协作提示：你是执行子会话「${roleLabel}」（同组还有：${otherNames}），你完成产出后将由主审会话「${leadSlot.label}」统一分析审查验收，请专注完成你的职责并清晰汇报修改/测试结果。】`
+                : `\n\n【协作提示：本任务同时派发给了 ${otherNames} 与你（${roleLabel}），请专注处理属于你的部分并清晰汇报结果。】`
               : '';
           return `${followUpPrefix}${promptBody}${peerNote}\n\n${buildIdeProtocolSuffix(r)}`;
         });
+        recordWaveOutputs(latestWaveResults);
 
         while (!this.cancelledExternalGroups.has(groupId) && collabRound < MAX_COLLAB_ROUNDS) {
           const collabHits = (latestWaveResults || []).filter(
             (item) => !item.cancelled && item.res?.ok !== false && item.res?.collabSignal?.needCollab
           );
-          if (collabHits.length === 0 || execTargets.length < 2) break;
+          if (collabHits.length === 0 || participatingSlots.length < 2) break;
 
           const collabSummaryLines = [];
           for (const hit of collabHits) {
             const requesterId = hit.actorId;
-            const peerId = requesterId === 'codex' ? 'antigravity' : 'codex';
+            const reqSlot = findSlot(requesterId);
             const sig = hit.res.collabSignal;
-            const peerLabel = peerId === 'codex' ? 'Codex' : 'Antigravity';
-            const reqLabel = requesterId === 'codex' ? 'Codex' : 'Antigravity';
+            const explicitPeer =
+              sig.to && sig.to !== 'all' && sig.to !== requesterId ? findSlot(sig.to) : null;
+            const fallbackPeer =
+              (leadSlot && leadSlot.slotId !== requesterId ? leadSlot : null) ||
+              participatingSlots.find((s) => s.slotId !== requesterId);
+            const peerSlot = explicitPeer || fallbackPeer;
+            if (!peerSlot) continue;
+            const peerId = peerSlot.slotId;
+            const peerLabel = peerSlot.label;
+            const reqLabel = reqSlot?.label || requesterId;
 
             this.ensureGroupIdeBoard(groupId, {
               stageText: `🤝 第 ${collabRound} 轮回群协作：${reqLabel} 与 ${peerLabel} 正在群内沟通对齐…`,
@@ -4173,7 +4594,7 @@ export class CcccBridge extends EventEmitter {
               `🤝 正在群内回应 ${reqLabel} 的协作请求…`
             );
 
-            const syncPrompt = `【AChat 回群协作沟通（第 ${collabRound} 轮）】\n${reqLabel} 在 IDE 执行任务途中回到群里向你发起协作请求：\n\n原因：${sig.reason}\n${reqLabel} 的沟通内容：\n"""\n${sig.message}\n"""\n\n用户总任务背景：\n${promptBody}\n\n请直接针对 ${reqLabel} 的请求在群聊中回复明确结论、接口/方案确认或下一步分工配合（保持精炼实用），随后系统会把新共识派回你们各自的 IDE 会话继续推进。\n可在末尾更新步骤标签 <!--achat-steps:[...]-->。`;
+            const syncPrompt = `【AChat 回群协作沟通（第 ${collabRound} 轮）】\n${reqLabel} 在 IDE 执行任务途中回到群里向你发起协作请求：\n\n原因：${sig.reason}\n${reqLabel} 的沟通内容：\n"""\n${sig.message}\n"""\n\n用户总任务背景：\n${promptBody}\n\n请直接针对 ${reqLabel} 的请求在群聊中回复明确结论、接口/方案确认或下一步分工配合（保持精炼实用），随后系统会把新共识派回各自 IDE 会话继续推进。\n可在末尾更新步骤标签 <!--achat-steps:[...]-->。`;
 
             const peerSyncRes = await this.runTargetSessionForActor({
               groupId,
@@ -4193,12 +4614,13 @@ export class CcccBridge extends EventEmitter {
               by: peerId,
               isUser: false,
               senderTitle: peerSyncRes.actorTitle || peerLabel,
-              senderRuntime: peerId,
+              senderRuntime: peerSlot.provider,
               to: [requesterId, 'user'],
               insight: `🤝 回群协作回应（第${collabRound}轮）· 回复 @${reqLabel}`,
               text: peerSyncRes.text,
               ok: peerSyncRes.ok !== false,
               thoughtTrace: peerSyncRes.thoughtTrace,
+              sessionReceipt: peerSyncRes.sessionReceipt,
             });
 
             collabSummaryLines.push(
@@ -4217,17 +4639,126 @@ export class CcccBridge extends EventEmitter {
           });
 
           latestWaveResults = await runParallelIdeWave(execTargets, collabRound, (r) => {
-            const roleLabel = r === 'codex' ? 'Codex' : 'Antigravity';
+            const roleLabel = findSlot(r)?.label || r;
             return `【AChat 回群协作后继续派单（第 ${collabRound} 轮）】\n用户原始任务：\n${promptBody}\n\n刚才在 AChat 群聊里刚达成的协作沟通结果：\n${collabContextBlock}\n\n请「${roleLabel}」结合上述群内最新共识，继续在当前目标 IDE 会话完成你的剩余工作并汇报结果。\n\n${buildIdeProtocolSuffix(r)}`;
           });
+          recordWaveOutputs(latestWaveResults);
+        }
+
+        // Lead Reviewer Automatic Acceptance Phase (`leadSlot` analyzes & verifies outputs of `workerSlots`)
+        if (
+          isLeadSupervisedFlow &&
+          routing.autoReview !== false &&
+          !this.cancelledExternalGroups.has(groupId)
+        ) {
+          for (let reviewAttempt = 1; reviewAttempt <= 2; reviewAttempt += 1) {
+            if (this.cancelledExternalGroups.has(groupId)) break;
+
+            const workerSummaries = workerSlots
+              .map((w) => {
+                const wRes = workerOutputBySlot.get(w.slotId);
+                const statusTag = wRes?.ok === false ? '异常' : '已汇报';
+                const body = String(wRes?.text || '（无文本输出）').slice(0, 2600);
+                return `### 子会话：${w.label} (@${w.slotId} · ${statusTag})\n${body}`;
+              })
+              .join('\n\n');
+
+            this.ensureGroupIdeBoard(groupId, {
+              stageText: `🔍 第 ${reviewAttempt} 轮主审验收：${leadSlot.label} 正在分析核对子会话产出…`,
+              round: collabRound,
+            });
+            this.emit('relay', {
+              groupId,
+              active: true,
+              step: 3,
+              text: `🔍 主审验收：${leadSlot.label} 正在分析审查 ${workerSlots.length} 个子会话产出…`,
+            });
+            this.setExternalActorThinking(
+              groupId,
+              leadSlot.slotId,
+              `🔍 正在分析审查并验收 ${workerSlots.map((w) => w.label).join('、')} 的产出…`
+            );
+
+            let leadReviewRes;
+            try {
+              const workerIdsHint = workerSlots.map((w) => w.slotId).join('" 或 "');
+              const reviewPrompt = `【AChat 主审统一分析与验收${reviewAttempt > 1 ? `（第 ${reviewAttempt} 轮复核）` : ''}】\n用户原始需求：\n${promptBody}\n\n各子会话最新执行与产出汇报如下：\n${workerSummaries}\n\n请你作为本群主审会话「${leadSlot.label}」在当前目标会话中核查工作区实际改动、运行必要测试或校验，并给出清晰可验证的审查验收结论。\n\n【主审判定标签规则（放在回答末尾，用户界面会自动隐藏此标签并触发流转）】：\n- 若全部子会话产出通过验收：在末尾附带\n  <!--achat-review:{"approved":true,"feedback":"全部通过验收"}-->\n- 若仍存在问题需要特定子会话按意见返修：在末尾附带（targets 填写需要返修的子会话 ID："${workerIdsHint}"）\n  <!--achat-review:{"approved":false,"targets":["${workerSlots[0].slotId}"],"feedback":"明确列出发现的问题与具体修复要求"}-->`;
+
+              leadReviewRes = await this.executeActorWithAutoWake({
+                groupId,
+                targetGroup,
+                actorId: leadSlot.slotId,
+                routing,
+                initialPrompt: reviewPrompt,
+                userTaskText: promptBody,
+                attachments,
+                replyStyle,
+                phase: 'lead_review',
+              });
+            } finally {
+              this.setExternalActorThinking(groupId, leadSlot.slotId, '');
+            }
+            if (this.cancelledExternalGroups.has(groupId)) break;
+
+            const verdict = leadReviewRes?.ok !== false ? leadReviewRes?.reviewVerdict : null;
+            await this.appendExternalDispatchMessage(groupId, {
+              by: leadSlot.slotId,
+              isUser: false,
+              senderTitle: leadReviewRes?.actorTitle || leadSlot.label,
+              senderRuntime: leadSlot.provider,
+              to: [...workerSlots.map((w) => w.slotId), 'user'],
+              insight:
+                verdict?.approved === false
+                  ? `🛠️ 主审验收退回返修${reviewAttempt > 1 ? `（第${reviewAttempt}轮）` : ''}`
+                  : `🔍 主审验收结论${reviewAttempt > 1 ? `（第${reviewAttempt}轮复核）` : ''}`,
+              text: leadReviewRes?.text || '',
+              ok: leadReviewRes?.ok !== false,
+              thoughtTrace: leadReviewRes?.thoughtTrace || [],
+              sessionReceipt: leadReviewRes?.sessionReceipt || null,
+            });
+
+            if (verdict && verdict.approved === false && reviewAttempt < 2) {
+              const targetWorkerIds =
+                verdict.targets.length > 0
+                  ? workerSlots.filter((w) => verdict.targets.includes(w.slotId)).map((w) => w.slotId)
+                  : workerSlots.map((w) => w.slotId);
+              const reworkTargets =
+                targetWorkerIds.length > 0 ? targetWorkerIds : workerSlots.map((w) => w.slotId);
+
+              collabRound += 1;
+              await this.appendExternalDispatchMessage(groupId, {
+                kind: 'system',
+                by: 'system',
+                text: `🛠️ ${leadSlot.label} 提出审查问题，已自动退回 ${reworkTargets
+                  .map((id) => findSlot(id)?.label || id)
+                  .join('、')} 按意见返修`,
+              });
+
+              const reworkFeedback = verdict.feedback || leadReviewRes.text;
+              latestWaveResults = await runParallelIdeWave(
+                reworkTargets,
+                collabRound,
+                (r) => {
+                  const roleLabel = findSlot(r)?.label || r;
+                  return `【AChat 主审验收退回返修（第 ${collabRound} 轮）】\n用户原始任务：\n${promptBody}\n\n主审会话「${leadSlot.label}」的审查验收意见：\n${reworkFeedback}\n\n主审完整批注：\n${leadReviewRes.text}\n\n请「${roleLabel}」仅针对上述主审提出的问题在当前 IDE 会话落地修复并完成自测，随后交由主审复核。\n\n${buildIdeProtocolSuffix(r)}`;
+                },
+                'rework'
+              );
+              recordWaveOutputs(latestWaveResults);
+              continue;
+            }
+            break;
+          }
         }
 
         if (!this.cancelledExternalGroups.has(groupId)) {
-          const hadFailure = (latestWaveResults || []).some((item) => item.res?.ok === false);
+          const hadFailure = Array.from(workerOutputBySlot.values()).some((r) => r?.ok === false);
           this.ensureGroupIdeBoard(groupId, {
             stageText: hadFailure
-              ? '⚠️ 部分 IDE 会话执行异常，可点击下方消息重试'
-              : '✅ 双端 IDE 任务已协同完成',
+              ? '⚠️ 部分 IDE 会话执行异常，可点击对应消息重试'
+              : isLeadSupervisedFlow
+                ? `✅ 多会话协同与「${leadSlot.label}」验收已完成`
+                : '✅ 多端 IDE 任务已协同完成',
             round: collabRound,
           });
         }
@@ -4461,14 +4992,18 @@ export class CcccBridge extends EventEmitter {
       }
     }
 
-    const preResolvedRecipients = this.resolveRecipients(cleanText, to, targetGroup.actors);
+    const activeExtSlots = getActiveExternalSlots(effectiveRouting);
+    const slotResolution = this.resolveExternalSlotRecipients(
+      cleanText,
+      to,
+      effectiveRouting,
+      targetGroup.actors
+    );
     const anyRecipientExternal =
       extraProviderMentions.length > 0 ||
-      preResolvedRecipients.some((r) => isAgentRoutedExternally(effectiveRouting, r));
+      slotResolution.recipients.some((r) => isAgentRoutedExternally(effectiveRouting, r));
     const anyGroupExternalForDiscuss =
-      effectiveRouting.flow === 'discuss_then_exec' &&
-      (isAgentRoutedExternally(effectiveRouting, 'codex') ||
-        isAgentRoutedExternally(effectiveRouting, 'antigravity'));
+      effectiveRouting.flow === 'discuss_then_exec' && activeExtSlots.length > 0;
 
     if (anyRecipientExternal || anyGroupExternalForDiscuss) {
       const mergedExternalRecipients =
@@ -4476,12 +5011,14 @@ export class CcccBridge extends EventEmitter {
           ? Array.from(
               new Set([
                 ...extraProviderMentions,
-                ...preResolvedRecipients.filter((r) => isAgentRoutedExternally(effectiveRouting, r)),
+                ...slotResolution.recipients.filter((r) =>
+                  isAgentRoutedExternally(effectiveRouting, r)
+                ),
               ])
             )
-          : preResolvedRecipients.length > 0
-            ? preResolvedRecipients
-            : ['codex', 'antigravity'];
+          : slotResolution.recipients.length > 0
+            ? slotResolution.recipients
+            : activeExtSlots.map((s) => s.slotId);
       const effectiveRoutingForTurn =
         extraProviderMentions.length > 0 && effectiveRouting.flow === 'discuss_then_exec'
           ? { ...effectiveRouting, flow: 'direct' }
@@ -4494,6 +5031,8 @@ export class CcccBridge extends EventEmitter {
         replyStyle: effectiveReplyStyle,
         routing: effectiveRoutingForTurn,
         followUp: Boolean(followUp),
+        isBroadcastAll:
+          extraProviderMentions.length === 0 && Boolean(slotResolution.isBroadcastAll),
       });
     }
 

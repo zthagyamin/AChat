@@ -269,30 +269,44 @@ function setupModernOverlayFallbacks() {
   }
 
   // Viewport-aware fallback positioning when CSS Anchor Positioning is unsupported
-  const morePop = document.getElementById('composerMorePopover');
-  const moreBtn = document.getElementById('composerMoreBtn');
-  if (morePop && moreBtn && !CSS.supports('position-area', 'block-start span-inline-start')) {
-    const placeMorePopover = () => {
-      const btnRect = moreBtn.getBoundingClientRect();
-      const popWidth = Math.min(356, window.innerWidth - 24);
+  const setupPopoverFallback = (popEl, btnEl, { maxW = 356, placeBelow = false } = {}) => {
+    if (!popEl || !btnEl || CSS.supports('position-area', 'block-start span-inline-start')) return;
+    const placePopover = () => {
+      const btnRect = btnEl.getBoundingClientRect();
+      const popWidth = Math.min(maxW, window.innerWidth - 24);
       const left = Math.max(12, Math.min(btnRect.right - popWidth, window.innerWidth - popWidth - 12));
-      const bottomOffset = Math.max(12, window.innerHeight - btnRect.top + 8);
-      morePop.style.position = 'fixed';
-      morePop.style.inset = 'auto';
-      morePop.style.left = `${Math.round(left)}px`;
-      morePop.style.bottom = `${Math.round(bottomOffset)}px`;
-    };
-    morePop.addEventListener('beforetoggle', (ev) => {
-      if (ev.newState === 'open') {
-        placeMorePopover();
+      popEl.style.position = 'fixed';
+      popEl.style.inset = 'auto';
+      popEl.style.left = `${Math.round(left)}px`;
+      if (placeBelow) {
+        const topOffset = Math.max(12, Math.min(btnRect.bottom + 8, window.innerHeight - 240));
+        popEl.style.top = `${Math.round(topOffset)}px`;
+        popEl.style.bottom = 'auto';
+      } else {
+        const bottomOffset = Math.max(12, window.innerHeight - btnRect.top + 8);
+        popEl.style.bottom = `${Math.round(bottomOffset)}px`;
+        popEl.style.top = 'auto';
       }
+    };
+    popEl.addEventListener('beforetoggle', (ev) => {
+      if (ev.newState === 'open') placePopover();
     });
     window.addEventListener('resize', () => {
-      if (morePop.matches?.(':popover-open') || morePop.classList.contains(':popover-open')) {
-        placeMorePopover();
+      if (popEl.matches?.(':popover-open') || popEl.classList.contains(':popover-open')) {
+        placePopover();
       }
     });
-  }
+  };
+  setupPopoverFallback(
+    document.getElementById('composerMorePopover'),
+    document.getElementById('composerMoreBtn'),
+    { maxW: 356, placeBelow: false }
+  );
+  setupPopoverFallback(
+    document.getElementById('chatQuickMenuPopover'),
+    document.getElementById('chatQuickMenuBtn'),
+    { maxW: 280, placeBelow: true }
+  );
 }
 
 // --- Application State ---
@@ -356,6 +370,8 @@ const state = {
   sessionFilterQuery: '',
   lastCodexSelectKey: '',
   lastAgySelectKey: '',
+  slotSelectCacheKeys: new Map(), // `${groupId}:${slotId}` -> cache key
+  openIdeSlotDetails: new Set(), // `${groupId}:${slotId}` expanded accordions
   queuedByGroup: new Map(), // groupId -> Array<{ rawInputText, attachments, quote, explicitRecipients }>
   drainingQueueGroupId: null,
   activeStreamsByGroup: new Map(), // groupId -> Map(streamId -> frame)
@@ -401,6 +417,9 @@ const els = {
   mobileBackBtn: document.getElementById('mobileBackBtn'),
   chatTitle: document.getElementById('chatTitle'),
   chatSubtitle: document.getElementById('chatSubtitle'),
+  openSessionRoutingBtn: document.getElementById('openSessionRoutingBtn'),
+  chatQuickMenuBtn: document.getElementById('chatQuickMenuBtn'),
+  chatQuickMenuPopover: document.getElementById('chatQuickMenuPopover'),
   pinSessionBtn: document.getElementById('pinSessionBtn'),
   openComputerPreviewBtn: document.getElementById('openComputerPreviewBtn'),
   replyStyleBtn: document.getElementById('replyStyleBtn'),
@@ -410,6 +429,8 @@ const els = {
   itbTaskTitle: document.getElementById('itbTaskTitle'),
   itbStageText: document.getElementById('itbStageText'),
   itbRoundPill: document.getElementById('itbRoundPill'),
+  itbRetryBtn: document.getElementById('itbRetryBtn'),
+  itbInterruptBtn: document.getElementById('itbInterruptBtn'),
   itbToggleBtn: document.getElementById('itbToggleBtn'),
   itbGrid: document.getElementById('itbGrid'),
   messageStream: document.getElementById('messageStream'),
@@ -448,28 +469,22 @@ const els = {
   composerMorePopover: document.getElementById('composerMorePopover'),
   sharedCtxStateHint: document.getElementById('sharedCtxStateHint'),
   replyModeStateHint: document.getElementById('replyModeStateHint'),
-  sessionTargetBar: document.getElementById('sessionTargetBar'),
+  sessionRoutingDialog: document.getElementById('sessionRoutingDialog'),
   toggleSessionPresetsBtn: document.getElementById('toggleSessionPresetsBtn'),
   sessionPresetPanel: document.getElementById('sessionPresetPanel'),
   sessionPresetSummary: document.getElementById('sessionPresetSummary'),
   sessionFlowSeg: document.getElementById('sessionFlowSeg'),
   sessionPermSeg: document.getElementById('sessionPermSeg'),
+  autoReviewToggleBtn: document.getElementById('autoReviewToggleBtn'),
   autoWakeToggleBtn: document.getElementById('autoWakeToggleBtn'),
   sessionFilterInput: document.getElementById('sessionFilterInput'),
   refreshExtSessionsBtn: document.getElementById('refreshExtSessionsBtn'),
+  presetOneLeadTwoAgyBtn: document.getElementById('presetOneLeadTwoAgyBtn'),
   resetSessionRoutingBtn: document.getElementById('resetSessionRoutingBtn'),
-  codexSessionSelect: document.getElementById('codexSessionSelect'),
-  codexSessionHint: document.getElementById('codexSessionHint'),
-  codexPreviewBtn: document.getElementById('codexPreviewBtn'),
-  codexNewDirRow: document.getElementById('codexNewDirRow'),
-  codexNewDirInput: document.getElementById('codexNewDirInput'),
-  codexPickDirBtn: document.getElementById('codexPickDirBtn'),
-  agySessionSelect: document.getElementById('agySessionSelect'),
-  agySessionHint: document.getElementById('agySessionHint'),
-  agyPreviewBtn: document.getElementById('agyPreviewBtn'),
-  agyNewDirRow: document.getElementById('agyNewDirRow'),
-  agyNewDirInput: document.getElementById('agyNewDirInput'),
-  agyPickDirBtn: document.getElementById('agyPickDirBtn'),
+  sessionSlotsList: document.getElementById('sessionSlotsList'),
+  addAgySlotBtn: document.getElementById('addAgySlotBtn'),
+  addCodexSlotBtn: document.getElementById('addCodexSlotBtn'),
+  srdSlotCountHint: document.getElementById('srdSlotCountHint'),
   recentProjectDirsList: document.getElementById('recentProjectDirsList'),
   queuedTurnBar: document.getElementById('queuedTurnBar'),
   queuedTurnText: document.getElementById('queuedTurnText'),
@@ -750,13 +765,22 @@ function getSelectedGroup() {
 
 function avatarMetaForActor(id = '', title = '') {
   const lower = String(id || title).toLowerCase();
+  const titleLower = String(title || '').toLowerCase();
   if (lower === 'user' || lower === '我') {
     return { cls: 'avatar-user', label: '我' };
   }
-  if (lower.includes('codex')) {
+  const agySlot = lower.match(/^agy-(\d+)$/);
+  if (agySlot) {
+    return { cls: 'avatar-antigravity', label: `A${agySlot[1]}` };
+  }
+  const cxSlot = lower.match(/^codex-(\d+)$/);
+  if (cxSlot) {
+    return { cls: 'avatar-codex', label: `C${cxSlot[1]}` };
+  }
+  if (lower.includes('codex') || titleLower.includes('codex')) {
     return { cls: 'avatar-codex', label: 'Cx' };
   }
-  if (lower.includes('antigravity')) {
+  if (lower.includes('antigravity') || /^ag[-_]?\d*$/i.test(lower) || titleLower.includes('ag-')) {
     return { cls: 'avatar-antigravity', label: 'Ag' };
   }
   if (lower.includes('claude')) {
@@ -776,6 +800,13 @@ function avatarMetaForActor(id = '', title = '') {
 
 function shortActorTag(actor) {
   if (!actor) return '';
+  const idLower = String(actor.id || '').toLowerCase();
+  if (idLower === 'codex') return 'Cx';
+  if (idLower === 'antigravity') return 'Ag';
+  const agMatch = idLower.match(/^agy-(\d+)$/);
+  if (agMatch) return `A${agMatch[1]}`;
+  const cxMatch = idLower.match(/^codex-(\d+)$/);
+  if (cxMatch) return `C${cxMatch[1]}`;
   const lower = String(actor.id || actor.title).toLowerCase();
   if (lower.includes('codex')) return 'Cx';
   if (lower.includes('antigravity')) return 'Ag';
@@ -1594,11 +1625,47 @@ function renderSessionColumn({ force = false } = {}) {
 function getThinkingActorsForGroup(group) {
   if (!group || group.kind === 'helper') return [];
   const liveIds = state.thinkingByGroup.get(group.id);
+  const extThinkMap =
+    group.externalThinking && typeof group.externalThinking === 'object' && !Array.isArray(group.externalThinking)
+      ? group.externalThinking
+      : {};
+  const board = state.ideBoardsByGroup.get(group.id) || group.ideBoard || null;
+  const routing = getNormalizedGroupRouting(group);
+  const idSet = new Set();
   if (Array.isArray(liveIds)) {
-    const idSet = new Set(liveIds);
-    return (group.actors || []).filter((a) => idSet.has(a.id));
+    for (const id of liveIds) idSet.add(id);
+  } else {
+    for (const a of group.actors || []) {
+      if (a.workingState === 'thinking') idSet.add(a.id);
+    }
   }
-  return (group.actors || []).filter((a) => a.workingState === 'thinking');
+  for (const extId of Object.keys(extThinkMap)) {
+    idSet.add(extId);
+  }
+  for (const [aid, ast] of Object.entries(board?.actors || {})) {
+    if (['aligning', 'running', 'collab', 'reviewing', 'rework'].includes(ast?.phase)) {
+      idSet.add(aid);
+    }
+  }
+  const result = [];
+  for (const id of idSet) {
+    const actor = (group.actors || []).find((a) => a.id === id);
+    const slot = routing.slots.find((s) => s.slotId === id);
+    const bActor = board?.actors?.[id];
+    const ext = extThinkMap[id];
+    result.push({
+      id,
+      title: slot?.label || bActor?.title || actor?.title || id,
+      workingState: 'thinking',
+      thinkingSince: ext?.since || bActor?.startedAt || actor?.thinkingSince || null,
+      liveStep: ext?.label
+        ? { kind: 'thinking', stepText: ext.label }
+        : bActor?.currentAction
+          ? { kind: 'thinking', stepText: bActor.currentAction }
+          : actor?.liveStep || null,
+    });
+  }
+  return result;
 }
 
 function formatElapsedSec(startMs) {
@@ -1609,21 +1676,30 @@ function formatElapsedSec(startMs) {
 }
 
 function updateTypingAndRelayBanners(group) {
+  if (els.relayBanner) {
+    els.relayBanner.hidden = true;
+  }
   if (!group || group.kind === 'helper') {
     els.typingBanner.hidden = true;
-    els.relayBanner.hidden = true;
+    if (els.itbRetryBtn) els.itbRetryBtn.hidden = true;
+    if (els.itbInterruptBtn) els.itbInterruptBtn.hidden = true;
     return;
   }
 
-  const relayInfo = state.relayByGroup.get(group.id);
-  if (relayInfo?.active && relayInfo.text) {
-    els.relayBannerText.textContent = relayInfo.text;
-    els.relayBanner.hidden = false;
-  } else {
-    els.relayBanner.hidden = true;
+  const thinking = getThinkingActorsForGroup(group);
+  const boardVisible = Boolean(els.ideTaskBoard && !els.ideTaskBoard.hidden);
+  const board = state.ideBoardsByGroup.get(group.id) || group.ideBoard || null;
+  const hasBoardError = Object.values(board?.actors || {}).some((a) => a?.phase === 'error');
+
+  if (els.itbRetryBtn) {
+    els.itbRetryBtn.hidden = !(boardVisible && (thinking.length > 0 || hasBoardError));
+    els.itbRetryBtn.disabled = state.controllingTurn;
+  }
+  if (els.itbInterruptBtn) {
+    els.itbInterruptBtn.hidden = !(boardVisible && thinking.length > 0);
+    els.itbInterruptBtn.disabled = state.controllingTurn;
   }
 
-  const thinking = getThinkingActorsForGroup(group);
   if (!thinking.length) {
     els.typingBanner.hidden = true;
     return;
@@ -1645,6 +1721,11 @@ function updateTypingAndRelayBanners(group) {
     if (!stepSnippet && a.liveStep?.stepText) {
       stepSnippet = a.liveStep.stepText;
     }
+  }
+
+  if (boardVisible) {
+    els.typingBanner.hidden = true;
+    return;
   }
 
   const names = thinking.map((a) => a.title || a.id).join('、');
@@ -1753,30 +1834,135 @@ function normalizeClientAgentTarget(raw = {}, defaultScopePath = '') {
   return { mode, sessionId, sessionTitle, cwd };
 }
 
+function normalizeClientSessionSlot(raw = {}, idx = 0, defaultScopePath = '') {
+  const obj = raw && typeof raw === 'object' ? raw : {};
+  const rawProv = String(obj.provider || obj.slotId || '').toLowerCase();
+  const provider = rawProv.includes('codex')
+    ? 'codex'
+    : rawProv.includes('antigravity') || rawProv.startsWith('agy') || rawProv.startsWith('ag')
+      ? 'antigravity'
+      : idx === 0
+        ? 'codex'
+        : 'antigravity';
+  const defaultSlotId =
+    idx === 0 && provider === 'codex'
+      ? 'codex'
+      : idx === 1 && provider === 'antigravity'
+        ? 'antigravity'
+        : `${provider === 'codex' ? 'codex' : 'agy'}-${idx + 1}`;
+  const slotId =
+    String(obj.slotId || defaultSlotId)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .slice(0, 32) || defaultSlotId;
+  const defaultLabel =
+    slotId === 'codex'
+      ? 'Codex'
+      : slotId === 'antigravity'
+        ? 'Antigravity'
+        : provider === 'codex'
+          ? `Codex-${slotId.replace(/^codex-?/i, '') || idx + 1}`
+          : `AG-${slotId.replace(/^agy-?/i, '') || idx + 1}`;
+  const label = String(obj.label || defaultLabel).trim().slice(0, 24) || defaultLabel;
+  const role = obj.role === 'lead' ? 'lead' : 'peer';
+  const target = normalizeClientAgentTarget(obj, defaultScopePath);
+  return {
+    slotId,
+    provider,
+    label,
+    role,
+    ...target,
+  };
+}
+
 function getNormalizedGroupRouting(group) {
   const raw = group?.sessionRouting && typeof group.sessionRouting === 'object' ? group.sessionRouting : {};
   const scopePath = group?.scopePath || '';
-  const codex = normalizeClientAgentTarget(raw.codex, scopePath);
-  const antigravity = normalizeClientAgentTarget(raw.antigravity, scopePath);
-  const hasAnyExternal = codex.mode !== 'group' || antigravity.mode !== 'group';
+  let slots = [];
+  if (Array.isArray(raw.slots) && raw.slots.length > 0) {
+    const usedIds = new Set();
+    let sawLead = false;
+    for (let i = 0; i < Math.min(raw.slots.length, 8); i += 1) {
+      const slot = normalizeClientSessionSlot(raw.slots[i], i, scopePath);
+      let sid = slot.slotId;
+      let suffix = 2;
+      while (usedIds.has(sid)) {
+        sid = `${slot.provider === 'codex' ? 'codex' : 'agy'}-${suffix}`;
+        suffix += 1;
+      }
+      usedIds.add(sid);
+      const role = slot.role === 'lead' && !sawLead ? 'lead' : 'peer';
+      if (role === 'lead') sawLead = true;
+      slots.push({ ...slot, slotId: sid, role });
+    }
+  } else {
+    const legacyCodex = normalizeClientAgentTarget(raw.codex, scopePath);
+    const legacyAgy = normalizeClientAgentTarget(raw.antigravity, scopePath);
+    slots = [
+      { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'peer', ...legacyCodex },
+      {
+        slotId: 'antigravity',
+        provider: 'antigravity',
+        label: 'Antigravity',
+        role: 'peer',
+        ...legacyAgy,
+      },
+    ];
+  }
+  const codexSlot = slots.find((s) => s.provider === 'codex');
+  const agySlot = slots.find((s) => s.provider === 'antigravity');
+  const codex = codexSlot
+    ? {
+        mode: codexSlot.mode,
+        sessionId: codexSlot.sessionId,
+        sessionTitle: codexSlot.sessionTitle,
+        cwd: codexSlot.cwd,
+      }
+    : normalizeClientAgentTarget(raw.codex, scopePath);
+  const antigravity = agySlot
+    ? {
+        mode: agySlot.mode,
+        sessionId: agySlot.sessionId,
+        sessionTitle: agySlot.sessionTitle,
+        cwd: agySlot.cwd,
+      }
+    : normalizeClientAgentTarget(raw.antigravity, scopePath);
+  const hasAnyExternal = slots.some((s) => s.mode === 'new' || (s.mode === 'existing' && s.sessionId));
   const flow = raw.flow === 'discuss_then_exec' ? 'discuss_then_exec' : 'direct';
   const permission = ['inherit', 'workspace-write', 'read-only'].includes(raw.permission)
     ? raw.permission
     : 'inherit';
   const autoWake = typeof raw.autoWake === 'boolean' ? raw.autoWake : true;
+  const autoReview = typeof raw.autoReview === 'boolean' ? raw.autoReview : true;
   return {
     enabled: Boolean(raw.enabled ?? hasAnyExternal),
     flow,
     permission,
     autoWake,
+    autoReview,
+    slots,
     codex,
     antigravity,
   };
 }
 
+function getActiveGroupSlots(routing) {
+  if (!routing || !Array.isArray(routing.slots)) return [];
+  return routing.slots.filter((s) => s.mode === 'new' || (s.mode === 'existing' && Boolean(s.sessionId)));
+}
+
 function isGroupExternallyRouted(routing) {
-  return Boolean(
-    routing && (routing.codex?.mode !== 'group' || routing.antigravity?.mode !== 'group')
+  return getActiveGroupSlots(routing).length > 0;
+}
+
+function resolveGroupSlot(routing, idOrProvider = '') {
+  const key = String(idOrProvider || '').trim().toLowerCase();
+  if (!key || !routing?.slots) return null;
+  return (
+    routing.slots.find((s) => s.slotId.toLowerCase() === key || s.label.toLowerCase() === key) ||
+    routing.slots.find((s) => s.provider === key) ||
+    null
   );
 }
 
@@ -1818,8 +2004,7 @@ async function loadExternalSessions({ force = false, silent = true } = {}) {
       recentDirectories: Array.isArray(res.recentDirectories) ? res.recentDirectories : [],
     };
     state.externalSessionsLoaded = true;
-    state.lastCodexSelectKey = '';
-    state.lastAgySelectKey = '';
+    state.slotSelectCacheKeys.clear();
     if (els.recentProjectDirsList) {
       els.recentProjectDirsList.replaceChildren();
       for (const dir of state.externalSessions.recentDirectories) {
@@ -1844,7 +2029,7 @@ async function loadExternalSessions({ force = false, silent = true } = {}) {
   }
 }
 
-function populateAgentSessionSelect(selectEl, agentKey, targetCfg, sessionsList, lastKeyProp) {
+function populateAgentSessionSelect(selectEl, agentKey, targetCfg, sessionsList, cacheSlotKey) {
   if (!selectEl) return;
   const filterQ = String(state.sessionFilterQuery || '').trim().toLowerCase();
   const filteredList = filterQ
@@ -1874,7 +2059,7 @@ function populateAgentSessionSelect(selectEl, agentKey, targetCfg, sessionsList,
       .join(','),
   ].join('|');
 
-  if (state[lastKeyProp] === selectKey && selectEl.options.length > 0) {
+  if (state.slotSelectCacheKeys.get(cacheSlotKey) === selectKey && selectEl.options.length > 0) {
     if (selectEl.value !== desiredVal) selectEl.value = desiredVal;
     return;
   }
@@ -1948,7 +2133,7 @@ function populateAgentSessionSelect(selectEl, agentKey, targetCfg, sessionsList,
 
   selectEl.appendChild(optGroup);
   selectEl.value = desiredVal;
-  state[lastKeyProp] = selectKey;
+  state.slotSelectCacheKeys.set(cacheSlotKey, selectKey);
 }
 
 function formatAgentSlotHint(agentKey, targetCfg, routing, group) {
@@ -1973,8 +2158,10 @@ function formatAgentSlotHint(agentKey, targetCfg, routing, group) {
   return '本群默认';
 }
 
+const ACTIVE_IDE_PHASES = new Set(['aligning', 'running', 'collab', 'reviewing', 'rework']);
+
 function formatBoardHeartbeatLabel(actorState) {
-  const active = ['aligning', 'running', 'collab'].includes(actorState?.phase);
+  const active = ACTIVE_IDE_PHASES.has(actorState?.phase);
   const nowMs = Date.now();
   const lastMs = actorState?.lastActivityAt ? new Date(actorState.lastActivityAt).getTime() : 0;
   const startMs = actorState?.startedAt ? new Date(actorState.startedAt).getTime() : 0;
@@ -2011,7 +2198,7 @@ function ensureIdeBoardTicker() {
     }
     const board = state.ideBoardsByGroup.get(g.id) || g.ideBoard;
     const actors = Object.values(board?.actors || {});
-    const hasActive = actors.some((a) => ['aligning', 'running', 'collab'].includes(a?.phase));
+    const hasActive = actors.some((a) => ACTIVE_IDE_PHASES.has(a?.phase));
     if (!hasActive) {
       stopIdeBoardTicker();
       return;
@@ -2028,17 +2215,27 @@ function renderIdeTaskBoard(group) {
   if (!group || group.kind === 'helper') {
     els.ideTaskBoard.hidden = true;
     stopIdeBoardTicker();
+    updateTypingAndRelayBanners(group);
     return;
   }
   const board = state.ideBoardsByGroup.get(group.id) || group.ideBoard || null;
   if (!board) {
     els.ideTaskBoard.hidden = true;
     stopIdeBoardTicker();
+    updateTypingAndRelayBanners(group);
     return;
   }
 
   els.ideTaskBoard.hidden = false;
-  const actorIds = ['codex', 'antigravity'].filter((id) => board.actors?.[id]);
+  const routing = getNormalizedGroupRouting(group);
+  const slotOrder = (routing.slots || []).map((s) => s.slotId);
+  const rawActorKeys = Object.keys(board.actors || {});
+  const orderedIds = [
+    ...slotOrder.filter((id) => board.actors?.[id]),
+    ...rawActorKeys.filter((id) => !slotOrder.includes(id)),
+  ];
+  const actorIds = orderedIds;
+
   const isCollapsed = isIdeBoardCollapsedForGroup(group.id);
   els.ideTaskBoard.classList.toggle('is-collapsed', isCollapsed);
   els.itbGrid.hidden = isCollapsed;
@@ -2054,7 +2251,8 @@ function renderIdeTaskBoard(group) {
       els.itbStageText.textContent = actorIds
         .map((id) => {
           const st = board.actors[id];
-          return `${st?.title || id} · ${st?.phaseLabel || '待命'}`;
+          const slot = resolveGroupSlot(routing, id);
+          return `${slot?.label || st?.title || id} · ${st?.phaseLabel || '待命'}`;
         })
         .join(' / ');
     } else {
@@ -2072,56 +2270,114 @@ function renderIdeTaskBoard(group) {
 
   for (const id of actorIds) {
     const a = board.actors[id];
-    const isActive = ['aligning', 'running', 'collab'].includes(a.phase);
+    const slot = resolveGroupSlot(routing, id);
+    const provider = a.provider || slot?.provider || (String(id).includes('codex') ? 'codex' : 'antigravity');
+    const role = a.role || slot?.role || 'peer';
+    const isActive = ACTIVE_IDE_PHASES.has(a.phase);
     if (isActive) anyActive = true;
 
-    const card = document.createElement('article');
-    card.className = `itb-card is-phase-${a.phase || 'idle'}`;
+    const detailsEl = document.createElement('details');
+    detailsEl.className = `itb-row is-phase-${a.phase || 'idle'}`;
+    detailsEl.dataset.slotId = id;
+    const detKey = `${group.id}:${id}`;
+    if (state.openIdeSlotDetails.has(detKey)) {
+      detailsEl.open = true;
+    }
+    detailsEl.addEventListener('toggle', () => {
+      if (detailsEl.open) {
+        state.openIdeSlotDetails.add(detKey);
+      } else {
+        state.openIdeSlotDetails.delete(detKey);
+      }
+    });
 
-    const top = document.createElement('div');
-    top.className = 'itb-card-top';
+    // No heading element inside <summary> (modern-web-guidance: accordion)
+    const summaryEl = document.createElement('summary');
+    summaryEl.className = 'itb-summary';
 
-    const who = document.createElement('div');
-    who.className = 'itb-card-who';
     const dot = document.createElement('span');
-    dot.className = `stb-agent-dot ${id === 'codex' ? 'is-cx' : 'is-ag'}`;
-    dot.textContent = id === 'codex' ? 'Cx' : 'Ag';
-    const titleEl = document.createElement('strong');
-    titleEl.textContent = a.title || (id === 'codex' ? 'Codex' : 'Antigravity');
-    who.append(dot, titleEl);
+    dot.className = `stb-agent-dot ${provider === 'codex' ? 'is-cx' : 'is-ag'}`;
+    dot.textContent = avatarMetaForActor(id, slot?.label || a.title).label;
+
+    const titleEl = document.createElement('span');
+    titleEl.className = 'itb-slot-name';
+    titleEl.textContent = slot?.label || a.title || (provider === 'codex' ? 'Codex' : 'Antigravity');
+
+    summaryEl.append(dot, titleEl);
+
+    if (role === 'lead') {
+      const leadBadge = document.createElement('span');
+      leadBadge.className = 'role-badge is-lead itb-lead-tag';
+      leadBadge.textContent = '主审';
+      summaryEl.appendChild(leadBadge);
+    }
 
     if (a.sessionTitle) {
       const sessEl = document.createElement('span');
       sessEl.className = 'itb-session-pill';
       sessEl.title = a.sessionTitle;
       sessEl.textContent = a.sessionTitle;
-      who.appendChild(sessEl);
+      summaryEl.appendChild(sessEl);
     }
 
-    const statusWrap = document.createElement('div');
-    statusWrap.className = 'itb-card-status';
     const phaseEl = document.createElement('span');
     phaseEl.className = `itb-phase-pill is-${a.phase || 'idle'}`;
-    phaseEl.textContent = a.phaseLabel || '待命中';
+    phaseEl.textContent = a.phaseLabel || '待命';
+    summaryEl.appendChild(phaseEl);
+
+    const steps = Array.isArray(a.steps) ? a.steps : [];
+    if (steps.length > 0) {
+      const doneCount = steps.filter((s) => s.status === 'done').length;
+      const ratioEl = document.createElement('span');
+      ratioEl.className = 'itb-step-ratio';
+      ratioEl.textContent = `${doneCount}/${steps.length}`;
+      summaryEl.appendChild(ratioEl);
+    }
+
+    const inlinePreview = a.currentAction || a.subtask || '';
+    if (inlinePreview) {
+      const actPreview = document.createElement('span');
+      actPreview.className = 'itb-inline-action';
+      actPreview.textContent = inlinePreview;
+      summaryEl.appendChild(actPreview);
+    }
+
     const hbEl = document.createElement('span');
-    hbEl.className = 'itb-heartbeat';
+    hbEl.className = 'itb-heartbeat itb-hb';
     hbEl.dataset.itbHb = id;
     hbEl.textContent = formatBoardHeartbeatLabel(a);
-    statusWrap.append(phaseEl, hbEl);
-    top.append(who, statusWrap);
-    card.appendChild(top);
+    summaryEl.appendChild(hbEl);
+
+    if (a.phase === 'error') {
+      const retryActorBtn = document.createElement('button');
+      retryActorBtn.type = 'button';
+      retryActorBtn.className = 'itb-slot-retry-btn';
+      retryActorBtn.title = `仅重试 ${slot?.label || a.title || id}`;
+      retryActorBtn.textContent = '↻';
+      retryActorBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        retrySingleActor(group.id, id);
+      });
+      summaryEl.appendChild(retryActorBtn);
+    }
+
+    detailsEl.appendChild(summaryEl);
+
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'itb-detail-body';
 
     if (a.subtask) {
       const subEl = document.createElement('div');
       subEl.className = 'itb-subtask';
       subEl.textContent = `负责：${a.subtask}`;
-      card.appendChild(subEl);
+      bodyEl.appendChild(subEl);
     }
 
-    if (Array.isArray(a.steps) && a.steps.length > 0) {
+    if (steps.length > 0) {
       const stepsUl = document.createElement('ul');
       stepsUl.className = 'itb-steps';
-      for (const step of a.steps) {
+      for (const step of steps) {
         const li = document.createElement('li');
         li.className = `itb-step is-${step.status || 'pending'}`;
         const icon = document.createElement('span');
@@ -2140,14 +2396,14 @@ function renderIdeTaskBoard(group) {
         li.append(icon, txt);
         stepsUl.appendChild(li);
       }
-      card.appendChild(stepsUl);
+      bodyEl.appendChild(stepsUl);
     }
 
     if (a.currentAction) {
       const curEl = document.createElement('div');
       curEl.className = 'itb-current-action';
       curEl.textContent = a.currentAction;
-      card.appendChild(curEl);
+      bodyEl.appendChild(curEl);
     }
 
     if (Array.isArray(a.recentActions) && a.recentActions.length > 0) {
@@ -2165,10 +2421,11 @@ function renderIdeTaskBoard(group) {
         li.append(timeEl, textEl);
         feedUl.appendChild(li);
       }
-      card.appendChild(feedUl);
+      bodyEl.appendChild(feedUl);
     }
 
-    frag.appendChild(card);
+    detailsEl.appendChild(bodyEl);
+    frag.appendChild(detailsEl);
   }
 
   els.itbGrid.replaceChildren(frag);
@@ -2177,46 +2434,168 @@ function renderIdeTaskBoard(group) {
   } else {
     stopIdeBoardTicker();
   }
+  updateTypingAndRelayBanners(group);
+}
+
+function updateSlotInGroupRouting(group, slotId, slotPatch) {
+  if (!group || group.kind === 'helper') return;
+  const base = getNormalizedGroupRouting(group);
+  const nextSlots = base.slots.map((s) => {
+    if (s.slotId !== slotId) {
+      if (slotPatch.role === 'lead' && s.role === 'lead') {
+        return { ...s, role: 'peer' };
+      }
+      return s;
+    }
+    return { ...s, ...slotPatch };
+  });
+  applyGroupSessionRoutingPatch(group, { slots: nextSlots });
+}
+
+function addSlotToGroupRouting(group, provider) {
+  if (!group || group.kind === 'helper') return;
+  const base = getNormalizedGroupRouting(group);
+  if (base.slots.length >= 8) {
+    showToast('最多支持同时编排 8 个目标会话');
+    return;
+  }
+  const safeProv = provider === 'codex' ? 'codex' : 'antigravity';
+  const usedIds = new Set(base.slots.map((s) => s.slotId));
+  let idx = 1;
+  const prefix = safeProv === 'codex' ? 'codex' : 'agy';
+  while (usedIds.has(`${prefix}-${idx}`)) idx += 1;
+  const slotId = `${prefix}-${idx}`;
+  const existingSameProv = base.slots.filter((s) => s.provider === safeProv).length + 1;
+  const label = safeProv === 'codex' ? `Codex-${existingSameProv}` : `AG-${existingSameProv}`;
+  const defaultScope = group.scopePath || '';
+  const usedSessions = new Set(
+    base.slots.filter((s) => s.mode === 'existing' && s.sessionId).map((s) => s.sessionId)
+  );
+  const candidates = (state.externalSessions[safeProv] || []).filter((s) => !usedSessions.has(s.id));
+  const picked = candidates[0] || null;
+  const newSlot = picked
+    ? {
+        slotId,
+        provider: safeProv,
+        label,
+        role: 'peer',
+        mode: 'existing',
+        sessionId: picked.id,
+        sessionTitle: picked.title || picked.id.slice(0, 8),
+        cwd: picked.cwd || defaultScope,
+      }
+    : {
+        slotId,
+        provider: safeProv,
+        label,
+        role: 'peer',
+        mode: defaultScope ? 'new' : 'group',
+        sessionId: '',
+        sessionTitle: '',
+        cwd: defaultScope,
+      };
+  applyGroupSessionRoutingPatch(group, { slots: [...base.slots, newSlot] });
+}
+
+function removeSlotFromGroupRouting(group, slotId) {
+  if (!group || group.kind === 'helper') return;
+  const base = getNormalizedGroupRouting(group);
+  if (base.slots.length <= 2) {
+    showToast('至少保留 2 个会话槽位');
+    return;
+  }
+  const nextSlots = base.slots.filter((s) => s.slotId !== slotId);
+  applyGroupSessionRoutingPatch(group, { slots: nextSlots });
+}
+
+function applyPresetOneLeadTwoAgy(group) {
+  if (!group || group.kind === 'helper') return;
+  const defaultScope = group.scopePath || '';
+  const cxList = state.externalSessions.codex || [];
+  const agList = state.externalSessions.antigravity || [];
+  const curRouting = getNormalizedGroupRouting(group);
+  const curCx = curRouting.slots.find((s) => s.provider === 'codex');
+  const cxTarget =
+    curCx && curCx.mode === 'existing' && curCx.sessionId
+      ? { mode: 'existing', sessionId: curCx.sessionId, sessionTitle: curCx.sessionTitle, cwd: curCx.cwd }
+      : cxList[0]
+        ? { mode: 'existing', sessionId: cxList[0].id, sessionTitle: cxList[0].title || '', cwd: cxList[0].cwd || defaultScope }
+        : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope };
+
+  const existingAgy = curRouting.slots.filter(
+    (s) => s.provider === 'antigravity' && s.mode === 'existing' && s.sessionId
+  );
+  const ag1Target = existingAgy[0]
+    ? { mode: 'existing', sessionId: existingAgy[0].sessionId, sessionTitle: existingAgy[0].sessionTitle, cwd: existingAgy[0].cwd }
+    : agList[0]
+      ? { mode: 'existing', sessionId: agList[0].id, sessionTitle: agList[0].title || '', cwd: agList[0].cwd || defaultScope }
+      : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope };
+  const ag2Pick = agList.find((s) => s.id !== ag1Target.sessionId) || null;
+  const ag2Target = existingAgy[1] && existingAgy[1].sessionId !== ag1Target.sessionId
+    ? { mode: 'existing', sessionId: existingAgy[1].sessionId, sessionTitle: existingAgy[1].sessionTitle, cwd: existingAgy[1].cwd }
+    : ag2Pick
+      ? { mode: 'existing', sessionId: ag2Pick.id, sessionTitle: ag2Pick.title || '', cwd: ag2Pick.cwd || defaultScope }
+      : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope };
+
+  applyGroupSessionRoutingPatch(group, {
+    flow: 'direct',
+    autoReview: true,
+    slots: [
+      { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'lead', ...cxTarget },
+      { slotId: 'agy-1', provider: 'antigravity', label: 'AG-1', role: 'peer', ...ag1Target },
+      { slotId: 'agy-2', provider: 'antigravity', label: 'AG-2', role: 'peer', ...ag2Target },
+    ],
+  });
+  showToast('已配置「1 Codex 主审 + 2 Antigravity 子会话」，可直接派发任务');
 }
 
 function renderSessionTargetBar(group) {
-  if (!els.targetSessionToggleBtn || !els.sessionTargetBar) return;
   if (!group || group.kind === 'helper') {
-    els.targetSessionToggleBtn.hidden = true;
-    els.sessionTargetBar.hidden = true;
-    els.sendBtn.textContent = '发送(S)';
-    els.messageInput.placeholder =
-      '输入消息，支持 @成员、/快捷指令、#引用项目文件、Ctrl+V 粘贴截图（Enter 发送）';
+    if (els.openSessionRoutingBtn) els.openSessionRoutingBtn.hidden = true;
+    if (els.targetSessionToggleBtn) els.targetSessionToggleBtn.hidden = true;
+    if (els.sendBtn) els.sendBtn.textContent = '发送(S)';
+    if (els.messageInput) {
+      els.messageInput.placeholder = '输入消息，@ 指定会话，/ 调指令…';
+    }
     return;
   }
 
   const routing = getNormalizedGroupRouting(group);
-  const isRouted = isGroupExternallyRouted(routing);
-  const isOpen = state.sessionBarOpenByGroup.has(group.id)
-    ? Boolean(state.sessionBarOpenByGroup.get(group.id))
-    : isRouted;
+  const activeSlots = getActiveGroupSlots(routing);
+  const isRouted = activeSlots.length > 0;
+  const leadSlot = activeSlots.find((s) => s.role === 'lead') || routing.slots.find((s) => s.role === 'lead');
+  const modalOpen = Boolean(els.sessionRoutingDialog?.open);
 
-  els.targetSessionToggleBtn.hidden = false;
-  els.targetSessionToggleBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-  els.targetSessionToggleBtn.classList.toggle('is-active', isOpen);
-  els.targetSessionToggleBtn.classList.toggle('is-routed', isRouted);
-  els.targetSessionToggleBtn.textContent = isRouted ? '已绑会话' : '目标会话';
+  if (els.openSessionRoutingBtn) {
+    els.openSessionRoutingBtn.hidden = false;
+    els.openSessionRoutingBtn.classList.toggle('is-routed', isRouted);
+    els.openSessionRoutingBtn.textContent = isRouted
+      ? `会话 · ${activeSlots.length}${leadSlot ? ' 主审' : ''}`
+      : '会话';
+  }
+  if (els.targetSessionToggleBtn) {
+    els.targetSessionToggleBtn.hidden = false;
+    els.targetSessionToggleBtn.setAttribute('aria-expanded', modalOpen ? 'true' : 'false');
+    els.targetSessionToggleBtn.classList.toggle('is-active', modalOpen);
+    els.targetSessionToggleBtn.classList.toggle('is-routed', isRouted);
+    els.targetSessionToggleBtn.textContent = isRouted ? `会话 · ${activeSlots.length}` : '会话';
+  }
 
-  els.sessionTargetBar.hidden = !isOpen;
-  els.sessionTargetBar.classList.toggle('is-routed', isRouted);
-
-  if (isOpen && !state.externalSessionsLoaded && !state.loadingExternalSessions) {
+  if (modalOpen && !state.externalSessionsLoaded && !state.loadingExternalSessions) {
     loadExternalSessions({ silent: true });
   }
 
   if (els.resetSessionRoutingBtn) {
-    els.resetSessionRoutingBtn.hidden = !isRouted;
+    els.resetSessionRoutingBtn.hidden = !isRouted && routing.slots.length <= 2;
   }
   if (els.refreshExtSessionsBtn) {
     els.refreshExtSessionsBtn.disabled = state.loadingExternalSessions;
-    els.refreshExtSessionsBtn.textContent = state.loadingExternalSessions
-      ? '扫描中…'
-      : '刷新会话';
+    els.refreshExtSessionsBtn.textContent = state.loadingExternalSessions ? '扫描中…' : '刷新会话';
+  }
+  if (els.addAgySlotBtn) els.addAgySlotBtn.disabled = routing.slots.length >= 8;
+  if (els.addCodexSlotBtn) els.addCodexSlotBtn.disabled = routing.slots.length >= 8;
+  if (els.srdSlotCountHint) {
+    els.srdSlotCountHint.textContent = `已启用 ${activeSlots.length} / 共 ${routing.slots.length} 槽位（上限 8）`;
   }
 
   if (els.sessionFlowSeg) {
@@ -2228,6 +2607,12 @@ function renderSessionTargetBar(group) {
     for (const btn of els.sessionPermSeg.querySelectorAll('[data-session-perm]')) {
       btn.classList.toggle('is-active', btn.dataset.sessionPerm === routing.permission);
     }
+  }
+  if (els.autoReviewToggleBtn) {
+    const isRevOn = routing.autoReview !== false;
+    els.autoReviewToggleBtn.setAttribute('aria-pressed', isRevOn ? 'true' : 'false');
+    els.autoReviewToggleBtn.classList.toggle('is-primary-tint', isRevOn);
+    els.autoReviewToggleBtn.textContent = isRevOn ? '主审自动验收 · 开' : '主审自动验收 · 关';
   }
   if (els.autoWakeToggleBtn) {
     const isWakeOn = routing.autoWake !== false;
@@ -2243,8 +2628,9 @@ function renderSessionTargetBar(group) {
         : routing.permission === 'read-only'
           ? '只读分析'
           : '沿用原权限';
+    const reviewTxt = routing.autoReview !== false ? '主审验收开' : '主审验收关';
     const wakeTxt = routing.autoWake !== false ? '自动唤醒开' : '自动唤醒关';
-    els.sessionPresetSummary.textContent = `${flowTxt} · ${permTxt} · ${wakeTxt}`;
+    els.sessionPresetSummary.textContent = `${flowTxt} · ${permTxt} · ${reviewTxt} · ${wakeTxt}`;
   }
   if (els.sessionPresetPanel && els.toggleSessionPresetsBtn) {
     const presetsOpen = Boolean(state.sessionPresetsOpenByGroup.get(group.id));
@@ -2253,77 +2639,218 @@ function renderSessionTargetBar(group) {
     els.toggleSessionPresetsBtn.classList.toggle('is-active', presetsOpen);
   }
 
-  populateAgentSessionSelect(
-    els.codexSessionSelect,
-    'codex',
-    routing.codex,
-    state.externalSessions.codex || [],
-    'lastCodexSelectKey'
-  );
-  populateAgentSessionSelect(
-    els.agySessionSelect,
-    'antigravity',
-    routing.antigravity,
-    state.externalSessions.antigravity || [],
-    'lastAgySelectKey'
-  );
+  if (els.sessionSlotsList && !(document.activeElement && els.sessionSlotsList.contains(document.activeElement) && document.activeElement.tagName === 'INPUT')) {
+    const dupCounts = new Map();
+    for (const s of routing.slots) {
+      if (s.mode === 'existing' && s.sessionId) {
+        const key = `${s.provider}:${s.sessionId}`;
+        dupCounts.set(key, (dupCounts.get(key) || 0) + 1);
+      }
+    }
+    const canPickDesktopDir = Boolean(window.electronApp?.pickDirectory);
+    const listFrag = document.createDocumentFragment();
 
-  if (els.codexSessionHint) {
-    els.codexSessionHint.textContent = formatAgentSlotHint('codex', routing.codex, routing, group);
-    els.codexSessionHint.classList.toggle('is-external', routing.codex.mode !== 'group');
-  }
-  if (els.codexPreviewBtn) {
-    els.codexPreviewBtn.hidden = !(routing.codex.mode === 'existing' && routing.codex.sessionId);
-  }
-  if (els.agySessionHint) {
-    els.agySessionHint.textContent = formatAgentSlotHint(
-      'antigravity',
-      routing.antigravity,
-      routing,
-      group
-    );
-    els.agySessionHint.classList.toggle('is-external', routing.antigravity.mode !== 'group');
-  }
-  if (els.agyPreviewBtn) {
-    els.agyPreviewBtn.hidden = !(
-      routing.antigravity.mode === 'existing' && routing.antigravity.sessionId
-    );
+    for (const slot of routing.slots) {
+      const card = document.createElement('div');
+      card.className = `srd-slot-card${slot.mode !== 'group' ? ' is-bound' : ''}${slot.role === 'lead' ? ' is-lead' : ''}`;
+      card.dataset.slotId = slot.slotId;
+
+      const topRow = document.createElement('div');
+      topRow.className = 'srd-slot-head';
+
+      const provSel = document.createElement('select');
+      provSel.className = 'srd-provider-select';
+      provSel.setAttribute('aria-label', `${slot.label} 引擎类型`);
+      const optAg = new Option('Antigravity', 'antigravity');
+      const optCx = new Option('Codex', 'codex');
+      provSel.append(optAg, optCx);
+      provSel.value = slot.provider;
+      provSel.addEventListener('change', () => {
+        const nextProv = provSel.value === 'codex' ? 'codex' : 'antigravity';
+        updateSlotInGroupRouting(group, slot.slotId, {
+          provider: nextProv,
+          mode: 'group',
+          sessionId: '',
+          sessionTitle: '',
+        });
+      });
+
+      const labelInput = document.createElement('input');
+      labelInput.type = 'text';
+      labelInput.className = 'srd-label-input';
+      labelInput.maxLength = 24;
+      labelInput.value = slot.label;
+      labelInput.placeholder = '会话别称（如 AG-1）';
+      labelInput.title = '用于群聊 @ 点名与进度看板标识的简短名称';
+      labelInput.addEventListener('change', () => {
+        const nextLabel = labelInput.value.trim().slice(0, 24) || slot.slotId;
+        if (nextLabel !== slot.label) {
+          updateSlotInGroupRouting(group, slot.slotId, { label: nextLabel });
+        }
+      });
+
+      const roleBtn = document.createElement('button');
+      roleBtn.type = 'button';
+      roleBtn.className = `srd-role-btn${slot.role === 'lead' ? ' is-lead' : ''}`;
+      roleBtn.textContent = slot.role === 'lead' ? '🎯 主审验收' : '成员';
+      roleBtn.title = '设为「主审」后，群发任务时子会话并行完成，主审自动分析审查并只打回不通过项';
+      roleBtn.addEventListener('click', () => {
+        const nextRole = slot.role === 'lead' ? 'peer' : 'lead';
+        updateSlotInGroupRouting(group, slot.slotId, { role: nextRole });
+      });
+
+      const headRight = document.createElement('div');
+      headRight.className = 'srd-head-right';
+      const hintSpan = document.createElement('span');
+      hintSpan.className = `stb-slot-hint${slot.mode !== 'group' ? ' is-external' : ''}`;
+      hintSpan.textContent = formatAgentSlotHint(slot.provider, slot, routing, group);
+      headRight.appendChild(hintSpan);
+
+      if (slot.mode === 'existing' && slot.sessionId) {
+        const previewBtn = document.createElement('button');
+        previewBtn.type = 'button';
+        previewBtn.className = 'stb-preview-btn';
+        previewBtn.textContent = '👁 预览';
+        previewBtn.title = '预览目标会话最近内容';
+        previewBtn.addEventListener('click', () => {
+          openExternalSessionPreview(slot.provider, slot.sessionId);
+        });
+        headRight.appendChild(previewBtn);
+      }
+
+      if (routing.slots.length > 2) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'srd-remove-btn';
+        delBtn.textContent = '×';
+        delBtn.title = '移除此槽位';
+        delBtn.setAttribute('aria-label', `移除 ${slot.label}`);
+        delBtn.addEventListener('click', () => {
+          removeSlotFromGroupRouting(group, slot.slotId);
+        });
+        headRight.appendChild(delBtn);
+      }
+
+      topRow.append(provSel, labelInput, roleBtn, headRight);
+      card.appendChild(topRow);
+
+      const selEl = document.createElement('select');
+      selEl.className = 'stb-select srd-session-select';
+      selEl.setAttribute('aria-label', `${slot.label} 绑定会话`);
+      populateAgentSessionSelect(
+        selEl,
+        slot.provider,
+        slot,
+        state.externalSessions[slot.provider] || [],
+        `${group.id}:${slot.slotId}`
+      );
+      selEl.addEventListener('change', () => {
+        const rawVal = String(selEl.value || 'group');
+        if (rawVal === 'group') {
+          updateSlotInGroupRouting(group, slot.slotId, {
+            mode: 'group',
+            sessionId: '',
+            sessionTitle: '',
+            cwd: '',
+          });
+          return;
+        }
+        if (rawVal === 'new') {
+          const firstRecent = state.externalSessions.recentDirectories?.[0];
+          const fallbackRecent =
+            typeof firstRecent === 'string' ? firstRecent : firstRecent?.path || '';
+          const defaultDir = slot.cwd || group.scopePath || fallbackRecent || '';
+          updateSlotInGroupRouting(group, slot.slotId, {
+            mode: 'new',
+            sessionId: '',
+            sessionTitle: '',
+            cwd: defaultDir,
+          });
+          return;
+        }
+        if (rawVal.startsWith('existing:')) {
+          const sid = rawVal.slice('existing:'.length);
+          const found = (state.externalSessions[slot.provider] || []).find((s) => s.id === sid);
+          updateSlotInGroupRouting(group, slot.slotId, {
+            mode: 'existing',
+            sessionId: sid,
+            sessionTitle: found?.title || slot.sessionTitle || sid.slice(0, 8),
+            cwd: found?.cwd || slot.cwd || '',
+          });
+        }
+      });
+      card.appendChild(selEl);
+
+      if (slot.mode === 'existing' && slot.sessionId && (dupCounts.get(`${slot.provider}:${slot.sessionId}`) || 0) > 1) {
+        const dupWarn = document.createElement('div');
+        dupWarn.className = 'srd-dup-warn';
+        dupWarn.textContent = '⚠ 该会话已在多个槽位重复绑定；并发执行时同会话将自动串行排队。';
+        card.appendChild(dupWarn);
+      }
+
+      if (slot.mode === 'new') {
+        const dirRow = document.createElement('div');
+        dirRow.className = 'stb-dir-row';
+        const dirInput = document.createElement('input');
+        dirInput.type = 'text';
+        dirInput.className = 'stb-dir-input';
+        dirInput.setAttribute('list', 'recentProjectDirsList');
+        dirInput.placeholder = '输入或选择新建会话的项目目录路径…';
+        dirInput.value = slot.cwd || group.scopePath || '';
+        const commitDir = () => {
+          const nextDir = dirInput.value.trim();
+          if (nextDir !== (slot.cwd || '')) {
+            updateSlotInGroupRouting(group, slot.slotId, { mode: 'new', cwd: nextDir });
+          }
+        };
+        dirInput.addEventListener('change', commitDir);
+        dirInput.addEventListener('blur', commitDir);
+        dirRow.appendChild(dirInput);
+
+        if (canPickDesktopDir) {
+          const pickBtn = document.createElement('button');
+          pickBtn.type = 'button';
+          pickBtn.className = 'stb-dir-btn';
+          pickBtn.textContent = '📂 浏览';
+          pickBtn.addEventListener('click', async () => {
+            const chosen = await window.electronApp.pickDirectory();
+            if (chosen) {
+              dirInput.value = chosen;
+              updateSlotInGroupRouting(group, slot.slotId, { mode: 'new', cwd: chosen });
+            }
+          });
+          dirRow.appendChild(pickBtn);
+        }
+        card.appendChild(dirRow);
+      }
+
+      listFrag.appendChild(card);
+    }
+
+    els.sessionSlotsList.replaceChildren(listFrag);
   }
 
-  const canPickDesktopDir = Boolean(window.electronApp?.pickDirectory);
-  if (els.codexNewDirRow) {
-    els.codexNewDirRow.hidden = routing.codex.mode !== 'new';
-    if (els.codexPickDirBtn) els.codexPickDirBtn.hidden = !canPickDesktopDir;
-    if (els.codexNewDirInput && document.activeElement !== els.codexNewDirInput) {
-      els.codexNewDirInput.value = routing.codex.cwd || group.scopePath || '';
+  if (els.sendBtn) {
+    if (isRouted) {
+      els.sendBtn.textContent =
+        routing.flow === 'discuss_then_exec'
+          ? `商量并派 (${activeSlots.length})`
+          : `派发 (${activeSlots.length})`;
+    } else {
+      els.sendBtn.textContent = '发送(S)';
     }
   }
-  if (els.agyNewDirRow) {
-    els.agyNewDirRow.hidden = routing.antigravity.mode !== 'new';
-    if (els.agyPickDirBtn) els.agyPickDirBtn.hidden = !canPickDesktopDir;
-    if (els.agyNewDirInput && document.activeElement !== els.agyNewDirInput) {
-      els.agyNewDirInput.value = routing.antigravity.cwd || group.scopePath || '';
-    }
-  }
-
-  if (isRouted) {
-    els.sendBtn.textContent =
-      routing.flow === 'discuss_then_exec' ? '商量并派单(S)' : '派发任务(S)';
-    els.messageInput.placeholder =
-      routing.flow === 'discuss_then_exec'
-        ? '输入跨会话协作任务：双方将先自动商量无重叠分工，随后并行派入上方指定会话执行（Enter 派发）'
-        : '输入任务直接派发至上方选定的具体会话，支持粘贴截图或引用文件（Enter 派发）';
-  } else {
-    els.sendBtn.textContent = '发送(S)';
-    els.messageInput.placeholder =
-      '输入消息，支持 @成员、/快捷指令、#引用项目文件、Ctrl+V 粘贴截图（Enter 发送）';
+  if (els.messageInput) {
+    els.messageInput.placeholder = isRouted
+      ? `输入任务（${activeSlots.length} 个目标会话就绪，@ 可点名单槽位）…`
+      : '输入消息，@ 指定会话，/ 调指令…';
   }
 }
 
 function applyGroupSessionRoutingPatch(group, partialRouting) {
   if (!group || group.kind === 'helper') return;
   const base = getNormalizedGroupRouting(group);
-  const next = {
+  const mergedRaw = {
     ...base,
     ...partialRouting,
     codex: partialRouting.codex ? { ...base.codex, ...partialRouting.codex } : base.codex,
@@ -2331,8 +2858,12 @@ function applyGroupSessionRoutingPatch(group, partialRouting) {
       ? { ...base.antigravity, ...partialRouting.antigravity }
       : base.antigravity,
   };
+  const next = getNormalizedGroupRouting({
+    scopePath: group.scopePath || '',
+    sessionRouting: mergedRaw,
+  });
   next.enabled = isGroupExternallyRouted(next);
-  state.sessionBarOpenByGroup.set(group.id, true);
+  state.slotSelectCacheKeys.clear();
   updateGroupCollabPrefs(group, { sessionRouting: next });
 }
 
@@ -2434,6 +2965,7 @@ function renderActiveHeaderAndRecipients() {
     els.chatTitle.textContent = group.title;
     els.chatSubtitle.textContent = group.topic;
     els.chatSubtitle.classList.remove('is-thinking');
+    if (els.openSessionRoutingBtn) els.openSessionRoutingBtn.hidden = true;
     if (els.replyStyleBtn) els.replyStyleBtn.hidden = true;
     els.speedGearBtn.hidden = true;
     els.collabModeBar.hidden = true;
@@ -2449,11 +2981,21 @@ function renderActiveHeaderAndRecipients() {
     if (els.scopeFileBtn) els.scopeFileBtn.hidden = true;
     updateTypingAndRelayBanners(group);
   } else {
-    els.chatTitle.textContent = `${group.title} (${group.memberCount})`;
+    const routing = getNormalizedGroupRouting(group);
+    const activeSlots = getActiveGroupSlots(routing);
+    const isExtRouted = activeSlots.length > 0;
+    els.chatTitle.textContent = isExtRouted
+      ? `${group.title} (${activeSlots.length} 会话)`
+      : `${group.title} (${group.memberCount})`;
     const thinking = getThinkingActorsForGroup(group);
     if (thinking.length > 0) {
-      els.chatSubtitle.textContent = `${thinking.map((a) => a.title).join('、')} 正在思考处理中…`;
+      els.chatSubtitle.textContent = `${thinking.map((a) => a.title).join('、')} 正在运行中…`;
       els.chatSubtitle.classList.add('is-thinking');
+    } else if (isExtRouted) {
+      els.chatSubtitle.textContent = activeSlots
+        .map((s) => `${s.label}${s.role === 'lead' ? '(主审)' : ''}`)
+        .join(' · ');
+      els.chatSubtitle.classList.remove('is-thinking');
     } else {
       const parts = (group.actors || []).map(
         (a) => `${a.title}${a.readOnly ? '[只读]' : ''} ${a.running ? '在线' : '已停'}`
@@ -2462,7 +3004,7 @@ function renderActiveHeaderAndRecipients() {
       els.chatSubtitle.classList.remove('is-thinking');
     }
 
-    // Header Reply Style Button (0ms instant 3-tier switch)
+    // Header / Quick Menu Reply Style Button (0ms instant 3-tier switch)
     if (els.replyStyleBtn) {
       const curStyle = ['plain', 'balanced', 'pro'].includes(group.replyStyle)
         ? group.replyStyle
@@ -2490,7 +3032,7 @@ function renderActiveHeaderAndRecipients() {
       els.replyStyleBtn.title = styleMeta.tip;
     }
 
-    // Header Speed Gear Button
+    // Speed Gear Button
     const isFast = group.speedGear === 'fast';
     els.speedGearBtn.hidden = false;
     els.speedGearBtn.disabled = state.switchingGear;
@@ -2505,8 +3047,6 @@ function renderActiveHeaderAndRecipients() {
       : '当前：深度思考档（完整推理强度）。点击切换为极速快聊档';
 
     // 3-Mode Collaboration Controls (superseded cleanly when target sessions are bound)
-    const routing = getNormalizedGroupRouting(group);
-    const isExtRouted = isGroupExternallyRouted(routing);
     const collabMode = group.collabMode || 'free';
     const enabledActors = (group.actors || []).filter((a) => a.enabled !== false);
     els.collabModeBar.hidden = isExtRouted || enabledActors.length < 2;
@@ -2518,14 +3058,7 @@ function renderActiveHeaderAndRecipients() {
       els.relayOrderBtn.hidden = true;
       els.blindHintChip.hidden = true;
       els.sharedCtxBtn.hidden = true;
-      if (routing.flow === 'discuss_then_exec') {
-        if (els.recipientBar.childElementCount > 0) {
-          els.recipientBar.replaceChildren();
-        }
-        state.lastRecipientChipsKey = '';
-      } else {
-        renderRecipientChips(group);
-      }
+      renderRecipientChips(group);
     } else if (collabMode === 'relay' && enabledActors.length >= 2) {
       const lead =
         enabledActors.find((a) => a.id === (group.relayLead || 'codex')) || enabledActors[0];
@@ -2570,8 +3103,22 @@ function renderActiveHeaderAndRecipients() {
 }
 
 function renderRecipientChips(group) {
-  const actors = group.actors || [];
-  if (actors.length === 0) {
+  const routing = getNormalizedGroupRouting(group);
+  const activeSlots = getActiveGroupSlots(routing);
+  const useSlots = activeSlots.length > 0;
+  const targetItems = useSlots
+    ? activeSlots.map((s) => ({
+        id: s.slotId,
+        chipText: s.role === 'lead' ? `@${s.label}·主审` : `@${s.label}`,
+        title: `${s.label} (${s.provider === 'codex' ? 'Codex' : 'Antigravity'})${s.sessionTitle ? ` · ${s.sessionTitle}` : ''}`,
+      }))
+    : (group.actors || []).map((a) => ({
+        id: a.id,
+        chipText: `@${a.id}`,
+        title: a.title || a.id,
+      }));
+
+  if (targetItems.length === 0) {
     if (els.recipientBar.childElementCount > 0) {
       els.recipientBar.replaceChildren();
     }
@@ -2579,8 +3126,10 @@ function renderRecipientChips(group) {
     return;
   }
 
-  const activeList = state.selectedRecipients.length ? state.selectedRecipients : ['@all'];
-  const nextChipsKey = `${group.id}|${actors.map((a) => a.id).join(',')}|${activeList.join(',')}`;
+  const validIdSet = new Set(targetItems.map((t) => t.id));
+  const sanitizedSel = state.selectedRecipients.filter((id) => id === '@all' || validIdSet.has(id));
+  const activeList = sanitizedSel.length ? sanitizedSel : ['@all'];
+  const nextChipsKey = `${group.id}|${useSlots ? 'slots' : 'actors'}|${targetItems.map((t) => `${t.id}:${t.chipText}`).join(',')}|${activeList.join(',')}`;
   if (nextChipsKey === state.lastRecipientChipsKey && els.recipientBar.childElementCount > 0) {
     return;
   }
@@ -2589,12 +3138,12 @@ function renderRecipientChips(group) {
 
   const activeSet = new Set(activeList);
 
-  if (actors.length > 1) {
+  if (targetItems.length > 1) {
     const allChip = document.createElement('button');
     allChip.type = 'button';
     const isAll = activeSet.has('@all');
     allChip.className = `recip-chip${isAll ? ' is-active' : ''}`;
-    allChip.textContent = '@所有人';
+    allChip.textContent = useSlots ? '@全部会话' : '@所有人';
     allChip.addEventListener('click', () => {
       state.selectedRecipients = ['@all'];
       renderRecipientChips(group);
@@ -2603,14 +3152,15 @@ function renderRecipientChips(group) {
     els.recipientBar.appendChild(allChip);
   }
 
-  for (const a of actors) {
+  for (const item of targetItems) {
     const chip = document.createElement('button');
     chip.type = 'button';
-    const isSel = activeSet.has(a.id) && !activeSet.has('@all');
+    const isSel = activeSet.has(item.id) && !activeSet.has('@all');
     chip.className = `recip-chip${isSel ? ' is-active' : ''}`;
-    chip.textContent = `@${a.id}`;
+    chip.textContent = item.chipText;
+    chip.title = item.title;
     chip.addEventListener('click', () => {
-      state.selectedRecipients = [a.id];
+      state.selectedRecipients = [item.id];
       renderRecipientChips(group);
       els.messageInput.focus();
     });
@@ -3345,7 +3895,10 @@ async function createMessageNode(msg, group, prevTs) {
     toggleMessageSelection(msg.id);
   });
 
-  const avInfo = avatarMetaForActor(msg.by, msg.senderTitle);
+  const groupRouting = group && group.kind !== 'helper' ? getNormalizedGroupRouting(group) : null;
+  const senderSlot = !isSelf && groupRouting ? resolveGroupSlot(groupRouting, msg.by) : null;
+  const resolvedSenderTitle = senderSlot?.label || msg.senderTitle;
+  const avInfo = avatarMetaForActor(msg.by, resolvedSenderTitle);
   const avatar = document.createElement('div');
   avatar.className = `msg-avatar ${avInfo.cls}`;
   avatar.textContent = avInfo.label;
@@ -3357,7 +3910,7 @@ async function createMessageNode(msg, group, prevTs) {
   metaLine.className = 'msg-meta-line';
 
   const senderSpan = document.createElement('span');
-  senderSpan.textContent = isSelf ? '我' : msg.senderTitle;
+  senderSpan.textContent = isSelf ? '我' : resolvedSenderTitle;
   metaLine.appendChild(senderSpan);
 
   if (msg._optimistic) {
@@ -3367,20 +3920,23 @@ async function createMessageNode(msg, group, prevTs) {
     metaLine.appendChild(sendingSpan);
   }
 
-  if (!isSelf && group?.actors) {
-    const actorObj = group.actors.find((a) => a.id === msg.by);
-    if (actorObj) {
-      const badge = document.createElement('span');
-      badge.className = `role-badge${actorObj.role === 'foreman' ? '' : ' is-peer'}`;
-      badge.textContent = `${actorObj.role === 'foreman' ? '工头' : '成员'}${actorObj.readOnly ? ' · 只读' : ''}`;
-      metaLine.appendChild(badge);
-    }
+  if (!isSelf && (senderSlot?.role === 'lead' || msg.sessionReceipt?.role === 'lead')) {
+    const badge = document.createElement('span');
+    badge.className = 'role-badge is-lead';
+    badge.textContent = '主审';
+    metaLine.appendChild(badge);
   }
 
   if (Array.isArray(msg.to) && msg.to.length > 0 && msg.to[0] !== 'file-helper') {
     const toSpan = document.createElement('span');
     toSpan.className = 'to-chip';
-    const formattedTo = msg.to.map((r) => (r === 'user' ? '我' : `@${r}`)).join(', ');
+    const formattedTo = msg.to
+      .map((r) => {
+        if (r === 'user') return '我';
+        const tSlot = groupRouting ? resolveGroupSlot(groupRouting, r) : null;
+        return `@${tSlot?.label || r}`;
+      })
+      .join(', ');
     toSpan.textContent = `→ ${formattedTo}`;
     metaLine.appendChild(toSpan);
   }
@@ -3406,7 +3962,7 @@ async function createMessageNode(msg, group, prevTs) {
         : msg.sessionReceipt.permission === 'workspace-write'
           ? ' · 可写'
           : '';
-    receiptBtn.textContent = `🎯 ${shortTitle}${permTag}`;
+    receiptBtn.textContent = `${shortTitle}${permTag}`;
     receiptBtn.title = `执行会话：${rawTitle}\n会话 ID：${msg.sessionReceipt.sessionId}${
       msg.sessionReceipt.cwd
         ? `\n项目目录：${msg.sessionReceipt.cwd}\n（点击打开或复制目录）`
@@ -3421,10 +3977,10 @@ async function createMessageNode(msg, group, prevTs) {
       }
     });
     metaLine.appendChild(receiptBtn);
-  } else if (isSessionStageInsight) {
+  } else if (isSessionStageInsight && !isSelf) {
     const stageChip = document.createElement('span');
-    stageChip.className = `session-receipt-chip${isSelf ? ' is-user-dispatch' : ''}`;
-    stageChip.textContent = msg.insight.length > 48 ? `${msg.insight.slice(0, 48)}…` : msg.insight;
+    stageChip.className = 'session-receipt-chip';
+    stageChip.textContent = msg.insight.length > 44 ? `${msg.insight.slice(0, 44)}…` : msg.insight;
     stageChip.title = msg.insight;
     metaLine.appendChild(stageChip);
   }
@@ -3513,13 +4069,6 @@ async function createMessageNode(msg, group, prevTs) {
     if (cardNode) {
       col.appendChild(cardNode);
     }
-  }
-
-  if (msg.insight && !isSessionStageInsight) {
-    const ins = document.createElement('div');
-    ins.className = 'msg-insight';
-    ins.textContent = `洞察摘要：${msg.insight}`;
-    col.appendChild(ins);
   }
 
   // Bubble Quick Action Bar (Quote / Forward to Peer / Resend / Multi-Select / Copy / Share)
@@ -5231,19 +5780,37 @@ function openMentionMenu(filter = '') {
   if (!state.providerEcosystem && !state.loadingProviders) {
     loadProviderEcosystem();
   }
+  const routing = getNormalizedGroupRouting(group);
+  const activeSlots = getActiveGroupSlots(routing);
+  const slotIds = new Set(activeSlots.map((s) => s.slotId));
   const actors = group.actors || [];
   const actorIds = new Set(actors.map((a) => a.id));
   const extraInstalledProviders = (state.providerEcosystem?.providers || []).filter(
-    (p) => p.installed && !actorIds.has(p.id)
+    (p) => p.installed && !actorIds.has(p.id) && !slotIds.has(p.id)
   );
+  const baseCandidates =
+    activeSlots.length > 0
+      ? activeSlots.map((s) => ({
+          kind: 'mention',
+          token: `@${s.slotId}`,
+          id: s.slotId,
+          label: `${s.label} (@${s.slotId})`,
+          role:
+            s.role === 'lead'
+              ? '主审验收'
+              : s.provider === 'codex'
+                ? 'Codex 会话'
+                : 'Antigravity 会话',
+        }))
+      : actors.map((a) => ({
+          kind: 'mention',
+          token: `@${a.id}`,
+          id: a.id,
+          label: `${a.title} (@${a.id})`,
+          role: a.role === 'foreman' ? '工头' : '成员',
+        }));
   const candidates = [
-    ...actors.map((a) => ({
-      kind: 'mention',
-      token: `@${a.id}`,
-      id: a.id,
-      label: `${a.title} (@${a.id})`,
-      role: a.role === 'foreman' ? '工头' : '成员',
-    })),
+    ...baseCandidates,
     ...extraInstalledProviders.map((p) => ({
       kind: 'mention',
       token: `@${p.id}`,
@@ -5251,8 +5818,16 @@ function openMentionMenu(filter = '') {
       label: `${p.title} (@${p.id})`,
       role: '本机扩展 CLI',
     })),
-    ...(actors.length > 1
-      ? [{ kind: 'mention', token: '@all', id: '@all', label: '所有人 (@all)', role: '全员广播' }]
+    ...(baseCandidates.length > 1
+      ? [
+          {
+            kind: 'mention',
+            token: '@all',
+            id: '@all',
+            label: activeSlots.length > 0 ? '全部会话 (@all)' : '所有人 (@all)',
+            role: '全员广播',
+          },
+        ]
       : []),
   ].filter(
     (c) => !filter || c.id.toLowerCase().includes(filter) || c.label.toLowerCase().includes(filter)
@@ -5678,20 +6253,19 @@ async function sendMessagePayload({
 
   const enabledActors = (group.actors || []).filter((a) => a.enabled !== false);
   const routing = getNormalizedGroupRouting(group);
-  if (routing.codex.mode === 'new' && els.codexNewDirInput?.value.trim()) {
-    routing.codex.cwd = els.codexNewDirInput.value.trim();
-  }
-  if (routing.antigravity.mode === 'new' && els.agyNewDirInput?.value.trim()) {
-    routing.antigravity.cwd = els.agyNewDirInput.value.trim();
-  }
-  const isExtRouted = group.kind !== 'helper' && isGroupExternallyRouted(routing);
+  const activeSlots = getActiveGroupSlots(routing);
+  const isExtRouted = group.kind !== 'helper' && activeSlots.length > 0;
   const isFollowUpTurn = Boolean(followUp);
 
   let targetActorIds = [];
   if (group.kind === 'helper') {
     targetActorIds = ['file-helper'];
-  } else if (isExtRouted && routing.flow === 'discuss_then_exec' && !isFollowUpTurn) {
-    targetActorIds = ['codex', 'antigravity'];
+  } else if (isExtRouted) {
+    if (recipientsSnapshot.length && !recipientsSnapshot.includes('@all')) {
+      targetActorIds = recipientsSnapshot;
+    } else {
+      targetActorIds = activeSlots.map((s) => s.slotId);
+    }
   } else if (!isExtRouted && collabMode === 'relay' && enabledActors.length >= 2) {
     const lead = enabledActors.find((a) => a.id === relayLead) || enabledActors[0];
     targetActorIds = [lead.id];
@@ -5712,11 +6286,6 @@ async function sendMessagePayload({
     senderRuntime: 'user',
     to: targetActorIds,
     mode,
-    insight: isExtRouted
-      ? isFollowUpTurn
-        ? '➕ 补充跟进 · 直达目标会话'
-        : `🎯 ${routing.flow === 'discuss_then_exec' ? '先商量再执行' : '直达目标会话'}`
-      : undefined,
     attachments: attachments.map((a) => ({
       kind: a.kind,
       name: a.fileName,
@@ -5741,10 +6310,17 @@ async function sendMessagePayload({
   }
 
   if (group.kind !== 'helper' && targetActorIds.length > 0) {
-    const initialThinking =
-      isExtRouted && routing.flow === 'discuss_then_exec' && !isFollowUpTurn
-        ? ['codex']
-        : targetActorIds;
+    let initialThinking = targetActorIds;
+    if (isExtRouted && !isFollowUpTurn) {
+      const leadSlot = activeSlots.find((s) => s.role === 'lead');
+      const workers = leadSlot ? activeSlots.filter((s) => s.slotId !== leadSlot.slotId) : [];
+      const isFullDispatch = targetActorIds.length >= activeSlots.length;
+      if (routing.flow === 'discuss_then_exec' && isFullDispatch) {
+        initialThinking = [activeSlots[0].slotId];
+      } else if (leadSlot && workers.length >= 1 && isFullDispatch) {
+        initialThinking = workers.map((w) => w.slotId);
+      }
+    }
     state.thinkingByGroup.set(group.id, initialThinking);
     renderActiveHeaderAndRecipients();
   }
@@ -5754,10 +6330,7 @@ async function sendMessagePayload({
       method: 'POST',
       body: JSON.stringify({
         text: wireText,
-        to:
-          isExtRouted && routing.flow === 'discuss_then_exec' && !isFollowUpTurn
-            ? ['@all']
-            : recipientsSnapshot,
+        to: recipientsSnapshot,
         mode,
         sharedContext,
         collabMode,
@@ -6551,6 +7124,20 @@ function syncThinkingStateFromGroups(groups) {
         state.thinkingStartedAt.delete(key);
       }
     }
+    if (g.externalThinking && typeof g.externalThinking === 'object') {
+      for (const [extId, extMeta] of Object.entries(g.externalThinking)) {
+        if (!thinkingIds.includes(extId)) {
+          thinkingIds.push(extId);
+        }
+        const extKey = `${g.id}:${extId}`;
+        if (extMeta?.since) {
+          const tsMs = new Date(extMeta.since).getTime();
+          if (!Number.isNaN(tsMs)) state.thinkingStartedAt.set(extKey, tsMs);
+        } else if (!state.thinkingStartedAt.has(extKey)) {
+          state.thinkingStartedAt.set(extKey, Date.now());
+        }
+      }
+    }
     state.thinkingByGroup.set(g.id, thinkingIds);
     if (g.ideBoard && typeof g.ideBoard === 'object') {
       const existingBoard = state.ideBoardsByGroup.get(g.id);
@@ -7026,13 +7613,21 @@ async function initApp() {
     updateTypingAndRelayBanners(g);
   }, 1000);
 
-  els.interruptTurnBtn?.addEventListener('click', () => {
-    const g = getSelectedGroup();
-    if (g) controlGroupTurn(g, 'interrupt');
-  });
-  els.retryTurnBtn?.addEventListener('click', () => {
-    const g = getSelectedGroup();
-    if (g) controlGroupTurn(g, 'retry');
+  for (const btn of [els.interruptTurnBtn, els.itbInterruptBtn]) {
+    btn?.addEventListener('click', () => {
+      const g = getSelectedGroup();
+      if (g) controlGroupTurn(g, 'interrupt');
+    });
+  }
+  for (const btn of [els.retryTurnBtn, els.itbRetryBtn]) {
+    btn?.addEventListener('click', () => {
+      const g = getSelectedGroup();
+      if (g) controlGroupTurn(g, 'retry');
+    });
+  }
+
+  els.openComputerPreviewBtn?.addEventListener('click', () => {
+    els.chatQuickMenuPopover?.hidePopover?.();
   });
 
   els.pinSessionBtn?.addEventListener('click', () => {
@@ -7052,28 +7647,41 @@ async function initApp() {
     updateGroupCollabPrefs(g, { replyStyle: nextStyle });
     triggerLightHaptic();
     const toasts = {
-      plain: '已切至「💬 人话精简」：少说废话、用大白话直接讲结论，不堆晦涩术语',
-      balanced: '已切至「⚖️ 适中清晰」：一句话结论 + 简短要点，通俗好读且有条理',
-      pro: '已切至「🔬 专业深度」：保留完整专业术语、源码依据与深入推导',
+      plain: '已切至「人话精简」：直接给结论，少堆术语',
+      balanced: '已切至「适中清晰」：结论先行 + 精简要点',
+      pro: '已切至「专业深度」：保留完整术语与源码依据',
     };
     showToast(toasts[nextStyle]);
   });
 
-  // Target Session Selector & Multi-Session Dispatch Event Listeners
-  els.targetSessionToggleBtn?.addEventListener('click', () => {
+  // Target Session Routing Modal & Multi-Session Orchestration Event Listeners
+  const handleOpenRoutingModal = () => {
     const g = getSelectedGroup();
     if (!g || g.kind === 'helper') return;
-    const routing = getNormalizedGroupRouting(g);
-    const curOpen = state.sessionBarOpenByGroup.has(g.id)
-      ? Boolean(state.sessionBarOpenByGroup.get(g.id))
-      : isGroupExternallyRouted(routing);
-    const nextOpen = !curOpen;
-    state.sessionBarOpenByGroup.set(g.id, nextOpen);
     triggerLightHaptic();
-    if (nextOpen) {
-      loadExternalSessions({ force: !state.externalSessionsLoaded, silent: true });
+    if (!state.externalSessionsLoaded && !state.loadingExternalSessions) {
+      loadExternalSessions({ silent: true });
     }
-    renderSessionTargetBar(g);
+    requestAnimationFrame(() => {
+      const cur = getSelectedGroup();
+      if (
+        cur &&
+        els.sessionRoutingDialog &&
+        !els.sessionRoutingDialog.open &&
+        typeof els.sessionRoutingDialog.showModal === 'function'
+      ) {
+        try {
+          els.sessionRoutingDialog.showModal();
+        } catch {}
+      }
+      renderSessionTargetBar(cur);
+    });
+  };
+  els.openSessionRoutingBtn?.addEventListener('click', handleOpenRoutingModal);
+  els.targetSessionToggleBtn?.addEventListener('click', handleOpenRoutingModal);
+
+  els.sessionRoutingDialog?.addEventListener('close', () => {
+    renderSessionTargetBar(getSelectedGroup());
   });
 
   els.itbToggleBtn?.addEventListener('click', () => {
@@ -7094,6 +7702,28 @@ async function initApp() {
     renderSessionTargetBar(g);
   });
 
+  els.presetOneLeadTwoAgyBtn?.addEventListener('click', () => {
+    const g = getSelectedGroup();
+    if (!g || g.kind === 'helper') return;
+    triggerLightHaptic();
+    applyPresetOneLeadTwoAgy(g);
+    showToast('已应用：1 Codex 主审验收 + 2 Antigravity 并行子会话');
+  });
+
+  els.addAgySlotBtn?.addEventListener('click', () => {
+    const g = getSelectedGroup();
+    if (!g || g.kind === 'helper') return;
+    triggerLightHaptic();
+    addSlotToGroupRouting(g, 'antigravity');
+  });
+
+  els.addCodexSlotBtn?.addEventListener('click', () => {
+    const g = getSelectedGroup();
+    if (!g || g.kind === 'helper') return;
+    triggerLightHaptic();
+    addSlotToGroupRouting(g, 'codex');
+  });
+
   els.sessionFlowSeg?.addEventListener('click', (ev) => {
     const btn = ev.target?.closest?.('[data-session-flow]');
     if (!btn) return;
@@ -7104,8 +7734,8 @@ async function initApp() {
     applyGroupSessionRoutingPatch(g, { flow: nextFlow });
     showToast(
       nextFlow === 'discuss_then_exec'
-        ? '已切至「🤝 先商量再执行」：先对齐无重叠分工，再自动派入下方目标会话并行落地'
-        : '已切至「🚀 直达会话」：发消息直接送入下方指定的目标会话执行'
+        ? '已切至「先商量再执行」：先对齐分工，再并行派入目标会话'
+        : '已切至「直达会话」：消息直接送入各已启用会话'
     );
   });
 
@@ -7120,11 +7750,25 @@ async function initApp() {
     triggerLightHaptic();
     applyGroupSessionRoutingPatch(g, { permission: nextPerm });
     const permMsgs = {
-      inherit: '权限已设为「⚙️ 沿用原权限」（已有会话沿用原设置，新建会话沿用本群默认）',
-      'workspace-write': '权限已设为「✏️ 允许改代码」（目标会话可直接创建和修改代码文件）',
-      'read-only': '权限已设为「🔒 只读分析」（目标会话仅限只读分析与审查，禁止改文件）',
+      inherit: '权限已设为「沿用原权限」',
+      'workspace-write': '权限已设为「允许改代码」',
+      'read-only': '权限已设为「只读分析」',
     };
     showToast(permMsgs[nextPerm]);
+  });
+
+  els.autoReviewToggleBtn?.addEventListener('click', () => {
+    const g = getSelectedGroup();
+    if (!g || g.kind === 'helper') return;
+    const curRouting = getNormalizedGroupRouting(g);
+    const nextRev = curRouting.autoReview === false;
+    triggerLightHaptic();
+    applyGroupSessionRoutingPatch(g, { autoReview: nextRev });
+    showToast(
+      nextRev
+        ? '已开启「主审自动验收」：子会话完成后自动送主审验收并在不通过时定向返工'
+        : '已关闭「主审自动验收」：各会话各自回复后即结束本轮'
+    );
   });
 
   els.autoWakeToggleBtn?.addEventListener('click', () => {
@@ -7136,8 +7780,8 @@ async function initApp() {
     applyGroupSessionRoutingPatch(g, { autoWake: nextWake });
     showToast(
       nextWake
-        ? '已开启「⏰ 长任务自动唤醒」：静默断连自动同会话续跑，无人值守未完阶段自动接力推进'
-        : '已关闭「⏰ 长任务自动唤醒」：单轮结束后将停留在原地等待手动指令'
+        ? '已开启「长任务自动唤醒」：断连自动续跑、未完阶段自动接力'
+        : '已关闭「长任务自动唤醒」：单轮结束后等待手动指令'
     );
   });
 
@@ -7148,27 +7792,8 @@ async function initApp() {
 
   els.sessionFilterInput?.addEventListener('input', () => {
     state.sessionFilterQuery = els.sessionFilterInput.value || '';
-    state.lastCodexSelectKey = '';
-    state.lastAgySelectKey = '';
+    state.slotSelectCacheKeys.clear();
     renderSessionTargetBar(getSelectedGroup());
-  });
-
-  els.codexPreviewBtn?.addEventListener('click', () => {
-    const g = getSelectedGroup();
-    if (!g) return;
-    const routing = getNormalizedGroupRouting(g);
-    if (routing.codex.mode === 'existing' && routing.codex.sessionId) {
-      openExternalSessionPreview('codex', routing.codex.sessionId);
-    }
-  });
-
-  els.agyPreviewBtn?.addEventListener('click', () => {
-    const g = getSelectedGroup();
-    if (!g) return;
-    const routing = getNormalizedGroupRouting(g);
-    if (routing.antigravity.mode === 'existing' && routing.antigravity.sessionId) {
-      openExternalSessionPreview('antigravity', routing.antigravity.sessionId);
-    }
   });
 
   els.resetSessionRoutingBtn?.addEventListener('click', () => {
@@ -7179,105 +7804,39 @@ async function initApp() {
       els.sessionFilterInput.value = '';
       state.sessionFilterQuery = '';
     }
+    state.slotSelectCacheKeys.clear();
     updateGroupCollabPrefs(g, {
       sessionRouting: {
         enabled: false,
         flow: 'direct',
         permission: 'inherit',
-        codex: { mode: 'group', sessionId: '', sessionTitle: '', cwd: '' },
-        antigravity: { mode: 'group', sessionId: '', sessionTitle: '', cwd: '' },
+        autoReview: true,
+        autoWake: true,
+        slots: [
+          {
+            slotId: 'codex',
+            provider: 'codex',
+            label: 'Codex',
+            role: 'lead',
+            mode: 'group',
+            sessionId: '',
+            sessionTitle: '',
+            cwd: '',
+          },
+          {
+            slotId: 'antigravity',
+            provider: 'antigravity',
+            label: 'Antigravity',
+            role: 'peer',
+            mode: 'group',
+            sessionId: '',
+            sessionTitle: '',
+            cwd: '',
+          },
+        ],
       },
     });
-    showToast('已恢复为本群默认会话');
-  });
-
-  const handleAgentSelectChange = (agentKey, selectEl) => {
-    const g = getSelectedGroup();
-    if (!g || g.kind === 'helper' || !selectEl) return;
-    const rawVal = String(selectEl.value || 'group');
-    const curRouting = getNormalizedGroupRouting(g);
-    if (rawVal === 'group') {
-      applyGroupSessionRoutingPatch(g, {
-        [agentKey]: { mode: 'group', sessionId: '', sessionTitle: '', cwd: '' },
-      });
-      return;
-    }
-    if (rawVal === 'new') {
-      const firstRecent = state.externalSessions.recentDirectories?.[0];
-      const fallbackRecentDir =
-        typeof firstRecent === 'string' ? firstRecent : firstRecent?.path || '';
-      const defaultDir = curRouting[agentKey]?.cwd || g.scopePath || fallbackRecentDir || '';
-      applyGroupSessionRoutingPatch(g, {
-        [agentKey]: { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultDir },
-      });
-      setTimeout(() => {
-        const inputEl = agentKey === 'codex' ? els.codexNewDirInput : els.agyNewDirInput;
-        inputEl?.focus();
-      }, 0);
-      return;
-    }
-    if (rawVal.startsWith('existing:')) {
-      const sid = rawVal.slice('existing:'.length);
-      const list = state.externalSessions[agentKey] || [];
-      const found = list.find((s) => s.id === sid);
-      applyGroupSessionRoutingPatch(g, {
-        [agentKey]: {
-          mode: 'existing',
-          sessionId: sid,
-          sessionTitle: found?.title || curRouting[agentKey]?.sessionTitle || sid.slice(0, 8),
-          cwd: found?.cwd || curRouting[agentKey]?.cwd || '',
-        },
-      });
-    }
-  };
-
-  els.codexSessionSelect?.addEventListener('change', () =>
-    handleAgentSelectChange('codex', els.codexSessionSelect)
-  );
-  els.agySessionSelect?.addEventListener('change', () =>
-    handleAgentSelectChange('antigravity', els.agySessionSelect)
-  );
-
-  const commitNewDirInput = (agentKey, inputEl) => {
-    const g = getSelectedGroup();
-    if (!g || g.kind === 'helper' || !inputEl) return;
-    const curRouting = getNormalizedGroupRouting(g);
-    if (curRouting[agentKey]?.mode !== 'new') return;
-    const nextDir = inputEl.value.trim();
-    if (nextDir === (curRouting[agentKey]?.cwd || '')) return;
-    applyGroupSessionRoutingPatch(g, {
-      [agentKey]: { ...curRouting[agentKey], mode: 'new', cwd: nextDir },
-    });
-  };
-
-  els.codexNewDirInput?.addEventListener('change', () =>
-    commitNewDirInput('codex', els.codexNewDirInput)
-  );
-  els.codexNewDirInput?.addEventListener('blur', () =>
-    commitNewDirInput('codex', els.codexNewDirInput)
-  );
-  els.agyNewDirInput?.addEventListener('change', () =>
-    commitNewDirInput('antigravity', els.agyNewDirInput)
-  );
-  els.agyNewDirInput?.addEventListener('blur', () =>
-    commitNewDirInput('antigravity', els.agyNewDirInput)
-  );
-
-  els.codexPickDirBtn?.addEventListener('click', async () => {
-    if (!window.electronApp?.pickDirectory) return;
-    const chosen = await window.electronApp.pickDirectory();
-    if (chosen && els.codexNewDirInput) {
-      els.codexNewDirInput.value = chosen;
-      commitNewDirInput('codex', els.codexNewDirInput);
-    }
-  });
-  els.agyPickDirBtn?.addEventListener('click', async () => {
-    if (!window.electronApp?.pickDirectory) return;
-    const chosen = await window.electronApp.pickDirectory();
-    if (chosen && els.agyNewDirInput) {
-      els.agyNewDirInput.value = chosen;
-      commitNewDirInput('antigravity', els.agyNewDirInput);
-    }
+    showToast('已恢复为本群默认双会话');
   });
 
   if ('serviceWorker' in navigator && !window.electronApp?.isDesktop) {
@@ -7996,7 +8555,8 @@ async function initApp() {
   renderSessionColumn();
 
   const firstActiveGroup = state.groups.find((g) => !g.archived) || state.groups[0] || null;
-  if (new URLSearchParams(window.location.search).get('preview') === 'running') {
+  const previewParam = new URLSearchParams(window.location.search).get('preview');
+  if (previewParam === 'running' || previewParam === '1' || previewParam === 'multisession') {
     const now = Date.now();
     const iso = (ms) => new Date(ms).toISOString();
 
@@ -8016,40 +8576,49 @@ async function initApp() {
       previewGroup = {
         id: 'preview-demo',
         kind: 'group',
-        title: 'AChat 架构重构协作群',
-        topic: '前后端联调 & 协议对齐',
-        scopePath: '~/projects/achat',
+        title: '皇室战争 AI 模型研发',
+        topic: '1 Codex 主审验收 + 2 Antigravity 并行子会话',
+        scopePath: '~/projects/cr-ai-model',
         actors: [
-          { id: 'codex', title: 'Codex', workingState: 'thinking' },
-          { id: 'antigravity', title: 'Antigravity', workingState: 'idle' },
+          { id: 'codex', title: 'Codex', role: 'lead', workingState: 'thinking' },
+          { id: 'agy-1', title: 'AG-1·训练', role: 'peer', workingState: 'idle' },
+          { id: 'agy-2', title: 'AG-2·推理', role: 'peer', workingState: 'idle' },
         ],
         speedGear: 'fast',
       };
       state.groups = [previewGroup];
     } else {
       previewGroup.kind = 'group';
-      previewGroup.title = 'AChat 架构联调协作';
+      previewGroup.title = '皇室战争 AI 模型研发';
       if (!previewGroup.scopePath) {
-        previewGroup.scopePath = '~/projects/achat';
+        previewGroup.scopePath = '~/projects/cr-ai-model';
       }
-      const upsertActor = (id, title, patch) => {
-        const idx = previewGroup.actors.findIndex((a) => a.id === id);
-        if (idx >= 0) {
-          previewGroup.actors[idx] = { ...previewGroup.actors[idx], title, ...patch };
-        } else {
-          previewGroup.actors.push({ id, title, ...patch });
-        }
-      };
-      upsertActor('codex', 'Codex', {
-        workingState: 'thinking',
-        thinkingSince: iso(now - 38000),
-        liveStep: { kind: 'tool', stepText: '正在校准断线重连补偿与轮次快照' },
-      });
-      upsertActor('antigravity', 'Antigravity', {
-        workingState: 'idle',
-        thinkingSince: null,
-        liveStep: null,
-      });
+      previewGroup.actors = [
+        {
+          id: 'codex',
+          title: 'Codex',
+          role: 'lead',
+          workingState: 'thinking',
+          thinkingSince: iso(now - 24000),
+          liveStep: { kind: 'tool', stepText: '正在对比 AG-2 定向返工后的 RGB 帧输入与 P95 时延' },
+        },
+        {
+          id: 'agy-1',
+          title: 'AG-1·训练',
+          role: 'peer',
+          workingState: 'idle',
+          thinkingSince: null,
+          liveStep: null,
+        },
+        {
+          id: 'agy-2',
+          title: 'AG-2·推理',
+          role: 'peer',
+          workingState: 'idle',
+          thinkingSince: null,
+          liveStep: null,
+        },
+      ];
     }
 
     if (!isSyntheticGroup) {
@@ -8064,69 +8633,147 @@ async function initApp() {
 
     await loadExternalSessions({ silent: true }).catch(() => {});
 
-    const scopePath = previewGroup.scopePath || '~/projects/achat';
+    const scopePath = previewGroup.scopePath || '~/projects/cr-ai-model';
+    const previewCx = [
+      {
+        id: 'preview-cx-lead',
+        title: 'review/cr-eval · 主审分析验收',
+        cwd: scopePath,
+        updatedAt: iso(now - 10000),
+      },
+    ];
+    const previewAg = [
+      {
+        id: 'preview-ag1-train',
+        title: 'feat/ppo-reward · 训练管线',
+        cwd: scopePath,
+        updatedAt: iso(now - 18000),
+      },
+      {
+        id: 'preview-ag2-infer',
+        title: 'feat/onnx-infer · 帧同步推理',
+        cwd: scopePath,
+        updatedAt: iso(now - 12000),
+      },
+    ];
+    state.externalSessions = {
+      codex: [...previewCx, ...(state.externalSessions?.codex || [])],
+      antigravity: [...previewAg, ...(state.externalSessions?.antigravity || [])],
+      recentDirectories: state.externalSessions?.recentDirectories || [scopePath],
+    };
+    state.externalSessionsLoaded = true;
+    state.slotSelectCacheKeys.clear();
+
+    previewGroup.externalThinking = {
+      codex: { label: '主审复验中', since: iso(now - 24000) },
+    };
     previewGroup.sessionRouting = {
       enabled: true,
       flow: 'discuss_then_exec',
       permission: 'workspace-write',
+      autoReview: true,
       autoWake: true,
-      codex: {
-        mode: 'existing',
-        sessionId: 'preview-cx-session',
-        sessionTitle: 'fix/sse-reconnect · 后端联调',
-        cwd: scopePath,
-      },
-      antigravity: {
-        mode: 'existing',
-        sessionId: 'preview-ag-session',
-        sessionTitle: 'feat/ide-board-ui · 前端看板联调',
-        cwd: scopePath,
-      },
+      slots: [
+        {
+          slotId: 'codex',
+          provider: 'codex',
+          label: 'Codex',
+          role: 'lead',
+          mode: 'existing',
+          sessionId: 'preview-cx-lead',
+          sessionTitle: 'review/cr-eval · 主审验收',
+          cwd: scopePath,
+        },
+        {
+          slotId: 'agy-1',
+          provider: 'antigravity',
+          label: 'AG-1·训练',
+          role: 'peer',
+          mode: 'existing',
+          sessionId: 'preview-ag1-train',
+          sessionTitle: 'feat/ppo-reward · 训练',
+          cwd: scopePath,
+        },
+        {
+          slotId: 'agy-2',
+          provider: 'antigravity',
+          label: 'AG-2·推理',
+          role: 'peer',
+          mode: 'existing',
+          sessionId: 'preview-ag2-infer',
+          sessionTitle: 'feat/onnx-infer · 推理',
+          cwd: scopePath,
+        },
+      ],
     };
 
     state.ideBoardCollapsedByGroup.delete(previewGroup.id);
+    state.openIdeSlotDetails.add(`${previewGroup.id}:codex`);
     state.ideBoardsByGroup.set(previewGroup.id, {
-      taskTitle: '重构实时看板与双 Agent 跨会话联动',
-      stageText: 'IDE 并发推进中 · 已回到群聊确认接口边界并继续落地',
+      taskTitle: '皇室战争 AI 模型：训练调优与帧同步推理验收',
+      stageText: '主审验收第 2 轮 · AG-1 已过审，仅 AG-2 定向返工后复验中',
       round: 2,
-      updatedAt: iso(now - 3000),
+      updatedAt: iso(now - 2000),
       actors: {
         codex: {
           actorId: 'codex',
+          provider: 'codex',
+          role: 'lead',
           title: 'Codex',
-          sessionTitle: 'fix/sse-reconnect · 后端',
-          phase: 'running',
-          phaseLabel: 'IDE 执行中',
-          startedAt: iso(now - 96000),
-          lastActivityAt: iso(now - 4000),
-          subtask: '校准 SSE 事件结构与断线重连契约',
+          sessionTitle: 'review/cr-eval · 主审',
+          phase: 'reviewing',
+          phaseLabel: '主审验收中',
+          startedAt: iso(now - 24000),
+          lastActivityAt: iso(now - 2000),
+          subtask: '核对 AG-1 训练收口与 AG-2 RGB 通道返工补丁',
           steps: [
-            { status: 'done', title: '群内对齐事件字段与阶段定义' },
-            { status: 'active', title: '在 Codex 会话补齐心跳推送与重连补偿' },
-            { status: 'pending', title: '回归验证并发派发与跨轮状态切换' },
+            { status: 'done', title: '确认 AG-1 PPO 奖励收敛，首轮准予通过' },
+            { status: 'done', title: '识别 AG-2 BGR 通道偏差，仅打回 AG-2 返工' },
+            { status: 'active', title: '复验 AG-2 RGB 对齐补丁与 16ms 帧推理预算' },
           ],
-          currentAction: '正在运行 SSE 重连时序校验并流式回报最新状态…',
+          currentAction: '正在比对 onnx_infer.py RGB 预处理张量与 benchmark P95…',
           recentActions: [
-            { ts: iso(now - 5000), text: '验证补齐 board.round 缺省为 1 的兼容性' },
+            { ts: iso(now - 4000), text: '跑通回归基准：AG-2 推理 P95 = 11.4ms (< 16ms)' },
           ],
         },
-        antigravity: {
-          actorId: 'antigravity',
-          title: 'Antigravity',
-          sessionTitle: 'feat/ide-board-ui · 前端',
-          phase: 'collab',
-          phaseLabel: '回群同步中',
-          startedAt: iso(now - 92000),
-          lastActivityAt: iso(now - 11000),
-          subtask: '打通顶部看板折叠态与群聊实时同步',
+        'agy-1': {
+          actorId: 'agy-1',
+          provider: 'antigravity',
+          role: 'peer',
+          title: 'AG-1·训练',
+          sessionTitle: 'feat/ppo-reward · 训练',
+          phase: 'done',
+          phaseLabel: '已验收通过',
+          startedAt: iso(now - 95000),
+          lastActivityAt: iso(now - 42000),
+          subtask: '调优圣水差奖励函数并导出 ONNX 检查点',
           steps: [
-            { status: 'done', title: '核对前端状态映射与卡片布局' },
-            { status: 'done', title: '完成顶部看板与精简底栏视图绑定' },
-            { status: 'active', title: '回群核对 round 缺省边界并准备收尾' },
+            { status: 'done', title: '调整费用差与防塔惩罚权重' },
+            { status: 'done', title: '导出 best_policy.onnx 与验证胜率报告' },
           ],
-          currentAction: '已回到群聊向 Codex 确认断线重连时的 round 与 phase 保底逻辑',
+          currentAction: '已通过主审验收，待命',
           recentActions: [
-            { ts: iso(now - 11000), text: '回群同步：前端已就绪，请确认异常断连时的 phase 值' },
+            { ts: iso(now - 42000), text: '提交 best_policy.onnx（验证胜率 +6.4%）' },
+          ],
+        },
+        'agy-2': {
+          actorId: 'agy-2',
+          provider: 'antigravity',
+          role: 'peer',
+          title: 'AG-2·推理',
+          sessionTitle: 'feat/onnx-infer · 推理',
+          phase: 'rework',
+          phaseLabel: '定向返工已修',
+          startedAt: iso(now - 68000),
+          lastActivityAt: iso(now - 12000),
+          subtask: '统一 RGB 帧输入并与主循环异步推理对接',
+          steps: [
+            { status: 'done', title: '按主审反馈将 cv2 BGR 转回 RGB' },
+            { status: 'done', title: '实测单帧端到端推理 P95 = 11.4ms' },
+          ],
+          currentAction: '已提交第 2 轮返工补丁，等待 Codex 主审复验',
+          recentActions: [
+            { ts: iso(now - 12000), text: '修复 BGR→RGB 通道排列，提交复验' },
           ],
         },
       },
@@ -8134,11 +8781,11 @@ async function initApp() {
 
     state.sessionBarOpenByGroup.set(previewGroup.id, false);
     state.thinkingByGroup.set(previewGroup.id, ['codex']);
-    state.thinkingStartedAt.set(`${previewGroup.id}:codex`, now - 38000);
+    state.thinkingStartedAt.set(`${previewGroup.id}:codex`, now - 24000);
     state.relayByGroup.set(previewGroup.id, {
       active: true,
       step: 2,
-      text: 'IDE 双路执行中（第 2 轮）：已派发各自会话，遇接口分歧自动回群沟通',
+      text: '主审第 2 轮验收中',
     });
 
     renderSessionColumn();
@@ -8151,60 +8798,70 @@ async function initApp() {
         by: 'user',
         senderTitle: '我',
         isUser: true,
-        to: ['codex', 'antigravity'],
-        ts: iso(now - 135000),
-        text: '先在群里对齐看板和事件结构，确定分工后分别回 Codex / Antigravity 会话并发改完；遇到接口或字段分歧再回这里碰头。',
+        to: ['codex', 'agy-1', 'agy-2'],
+        ts: iso(now - 140000),
+        text: 'AG-1 先调优 PPO 奖励并导出权重，AG-2 完成 ONNX 帧同步推理；两边改完后由 Codex 统一分析审查验收。',
       },
       {
-        id: 'preview-msg-sys',
-        kind: 'system',
-        by: 'system',
-        ts: iso(now - 118000),
-        text: '先聊后派 IDE（第 1 轮分工完成）：Codex → fix/sse-reconnect · Antigravity → feat/ide-board-ui',
-      },
-      {
-        id: 'preview-msg-ag-sync',
+        id: 'preview-msg-ag1-done',
         kind: 'chat',
-        by: 'antigravity',
-        senderTitle: 'Antigravity',
+        by: 'agy-1',
+        senderTitle: 'AG-1·训练',
+        role: 'peer',
         isUser: false,
         to: ['codex'],
-        ts: iso(now - 32000),
-        insight: '回到群聊核对 round 字段与断连 phase',
+        ts: iso(now - 72000),
         sessionReceipt: {
-          sessionId: 'preview-ag-session',
-          sessionTitle: 'feat/ide-board-ui',
+          sessionId: 'preview-ag1-train',
+          sessionTitle: 'feat/ppo-reward · 训练',
+          permission: 'workspace-write',
+          cwd: scopePath,
+        },
+        text: 'PPO 奖励调优已完成，导出 `best_policy.onnx`（输入形状 `[1, 3, 224, 224]` RGB）。验证集 200 局胜率较基线提升 6.4%，请主审验收。',
+      },
+      {
+        id: 'preview-msg-cx-rework',
+        kind: 'chat',
+        by: 'codex',
+        senderTitle: 'Codex',
+        role: 'lead',
+        isUser: false,
+        to: ['agy-2'],
+        ts: iso(now - 45000),
+        sessionReceipt: {
+          sessionId: 'preview-cx-lead',
+          sessionTitle: 'review/cr-eval · 主审',
           permission: 'workspace-write',
           cwd: scopePath,
         },
         thoughtTrace: [
           {
             kind: 'tool',
-            text: 'Inspect #ideTaskBoard state diff across SSE reconnect',
+            text: 'Diff ag1/export_onnx.py vs ag2/onnx_infer.py input tensor channels',
           },
           {
             kind: 'reasoning',
-            text: '前端需确保断连重连期间轮次徽标与步骤勾选状态连续，不因缺省字段被清空。',
+            text: 'AG-1 导出为 RGB，而 AG-2 仍保留 OpenCV 默认 BGR 顺序；AG-1 无需重跑，仅打回 AG-2 定向修正。',
           },
         ],
-        text: '@codex 前端顶部看板和流式状态已接通。我在联调第 2 轮时发现个边界：断线重连瞬间的增量事件里如果省略 `board.round`，卡片轮次徽标会闪烁一下；建议后端补默认 `round >= 1`，确认后我就收尾。',
+        text: '第 1 轮审查结论：**AG-1 验收通过**（无需返工）。\n**仅 @AG-2·推理 定向返工**：`onnx_infer.py` 抓帧仍是 BGR，与 AG-1 导出的 RGB 张量不一致；请转成 RGB 并确认 P95 时延 < 16ms 后回报。',
       },
       {
-        id: 'preview-msg-cx-sync',
+        id: 'preview-msg-ag2-rework',
         kind: 'chat',
-        by: 'codex',
-        senderTitle: 'Codex',
+        by: 'agy-2',
+        senderTitle: 'AG-2·推理',
+        role: 'peer',
         isUser: false,
-        to: ['antigravity'],
-        ts: iso(now - 18000),
-        insight: '群内对齐协议，继续回 IDE 落地修复',
+        to: ['codex'],
+        ts: iso(now - 14000),
         sessionReceipt: {
-          sessionId: 'preview-cx-session',
-          sessionTitle: 'fix/sse-reconnect',
+          sessionId: 'preview-ag2-infer',
+          sessionTitle: 'feat/onnx-infer · 推理',
           permission: 'workspace-write',
           cwd: scopePath,
         },
-        text: '收到。同意保留服务端唯一真源：`board.round` 在快照序列化和断线增量包里统一保底为当前轮次，顺便补上断线期间的心跳时间戳顺延，我现在回 Codex 会话直接落代码并跑单测。',
+        text: '已定向修复 `cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)`，连续 300 帧基准测试零告警，端到端 P95 = 11.4ms，已提交主审复验。',
       },
     ];
 
@@ -8225,16 +8882,16 @@ async function initApp() {
       by: 'codex',
       senderTitle: 'Codex',
       phase: 'tool',
-      stepLabel: 'Codex IDE 会话运行中 · 正在校验断线重连与轮次快照 (38s)',
-      text: '已在重连增量链路保底写入 round 与 phase 连续状态，正在运行实时桥接单测核对第 2 轮并发恢复时心跳不归零…',
+      stepLabel: 'Codex 主审复验中 · 核对 AG-2 RGB 对齐补丁 (24s)',
+      text: '已验证 AG-1 权重通道与 AG-2 返回的 RGB 预处理完全匹配，正在汇总整轮验收报告…',
       thoughtTrace: [
         {
           kind: 'reasoning',
-          text: '回到 fix/sse-reconnect 会话：定位到断连补偿构造快照时未继承上一轮 round 计数，需从群级协作状态兜底读取。',
+          text: '复检 AG-2 补丁：BGR2RGB 已位于裁剪缩放前执行，张量均值与训练集对齐。',
         },
         {
           kind: 'tool',
-          text: 'run_shell: node --test test/bridge-realtime.test.mjs (verifying ideBoard reconnect snapshot)',
+          text: 'run_shell: pytest tests/test_onnx_infer.py -k rgb_alignment',
         },
       ],
       done: false,

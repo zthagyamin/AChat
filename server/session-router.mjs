@@ -10,6 +10,9 @@ import { executeExtraProviderTurn } from './fusion-hub.mjs';
 export const VALID_SESSION_FLOWS = ['direct', 'discuss_then_exec'];
 export const VALID_SESSION_PERMISSIONS = ['inherit', 'workspace-write', 'read-only'];
 export const VALID_TARGET_MODES = ['group', 'existing', 'new'];
+export const VALID_SLOT_PROVIDERS = ['codex', 'antigravity'];
+export const VALID_SLOT_ROLES = ['peer', 'lead'];
+const MAX_ROUTING_SLOTS = 8;
 export const DEFAULT_IDLE_TIMEOUT_MS = 600_000;
 
 const HOME_DIR = os.homedir();
@@ -181,31 +184,184 @@ function normalizeSingleAgentTarget(raw = {}, defaultScopePath = '') {
   return { mode, sessionId, sessionTitle, cwd };
 }
 
+export function normalizeSessionSlot(
+  raw = {},
+  index = 0,
+  defaultScopePath = '',
+  usedIds = new Set(),
+  providerCounts = { codex: 0, antigravity: 0 }
+) {
+  const obj = raw && typeof raw === 'object' ? raw : {};
+  const rawIdHint = String(obj.slotId || obj.id || '').trim().toLowerCase();
+  const provider = VALID_SLOT_PROVIDERS.includes(obj.provider)
+    ? obj.provider
+    : VALID_SLOT_PROVIDERS.includes(obj.agent)
+      ? obj.agent
+      : rawIdHint.startsWith('codex')
+        ? 'codex'
+        : 'antigravity';
+
+  providerCounts[provider] = (providerCounts[provider] || 0) + 1;
+  const provNum = providerCounts[provider];
+  const fallbackBase =
+    provNum === 1 ? provider : provider === 'codex' ? `codex-${provNum}` : `agy-${provNum}`;
+
+  let slotId = String(obj.slotId || obj.id || fallbackBase)
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 36);
+  if (!slotId || usedIds.has(slotId)) {
+    let candidate = fallbackBase;
+    let n = provNum;
+    while (usedIds.has(candidate)) {
+      n += 1;
+      candidate = `${provider === 'codex' ? 'codex' : 'agy'}-${n}`;
+    }
+    slotId = candidate;
+  }
+  usedIds.add(slotId);
+
+  const defaultLabel =
+    provNum === 1
+      ? provider === 'codex'
+        ? 'Codex'
+        : 'Antigravity'
+      : provider === 'codex'
+        ? `Codex #${provNum}`
+        : `AG-${provNum}`;
+  const label = String(obj.label || obj.title || defaultLabel).trim().slice(0, 32) || defaultLabel;
+  const role = VALID_SLOT_ROLES.includes(obj.role) ? obj.role : 'peer';
+  const target = normalizeSingleAgentTarget(obj, defaultScopePath);
+  return {
+    slotId,
+    provider,
+    label,
+    role,
+    ...target,
+  };
+}
+
 export function normalizeSessionRouting(raw = {}, defaultScopePath = '') {
   const obj = raw && typeof raw === 'object' ? raw : {};
-  const codex = normalizeSingleAgentTarget(obj.codex, defaultScopePath);
-  const antigravity = normalizeSingleAgentTarget(obj.antigravity, defaultScopePath);
-  const hasAnyExternal = codex.mode !== 'group' || antigravity.mode !== 'group';
+  const usedIds = new Set();
+  const providerCounts = { codex: 0, antigravity: 0 };
+
+  let slots = [];
+  let codex;
+  let antigravity;
+
+  if (Array.isArray(obj.slots) && obj.slots.length > 0) {
+    slots = obj.slots
+      .slice(0, MAX_ROUTING_SLOTS)
+      .map((s, idx) => normalizeSessionSlot(s, idx, defaultScopePath, usedIds, providerCounts));
+    const firstCodex = slots.find((s) => s.provider === 'codex');
+    const firstAgy = slots.find((s) => s.provider === 'antigravity');
+    codex = firstCodex
+      ? {
+          mode: firstCodex.mode,
+          sessionId: firstCodex.sessionId,
+          sessionTitle: firstCodex.sessionTitle,
+          cwd: firstCodex.cwd,
+        }
+      : normalizeSingleAgentTarget({}, defaultScopePath);
+    antigravity = firstAgy
+      ? {
+          mode: firstAgy.mode,
+          sessionId: firstAgy.sessionId,
+          sessionTitle: firstAgy.sessionTitle,
+          cwd: firstAgy.cwd,
+        }
+      : normalizeSingleAgentTarget({}, defaultScopePath);
+  } else {
+    codex = normalizeSingleAgentTarget(obj.codex, defaultScopePath);
+    antigravity = normalizeSingleAgentTarget(obj.antigravity, defaultScopePath);
+    slots = [
+      normalizeSessionSlot(
+        { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'peer', ...codex },
+        0,
+        defaultScopePath,
+        usedIds,
+        providerCounts
+      ),
+      normalizeSessionSlot(
+        {
+          slotId: 'antigravity',
+          provider: 'antigravity',
+          label: 'Antigravity',
+          role: 'peer',
+          ...antigravity,
+        },
+        1,
+        defaultScopePath,
+        usedIds,
+        providerCounts
+      ),
+    ];
+  }
+
+  const hasAnyExternal = slots.some(
+    (s) => (s.mode === 'existing' && Boolean(s.sessionId)) || s.mode === 'new'
+  );
   const enabled = typeof obj.enabled === 'boolean' ? obj.enabled : hasAnyExternal;
   const flow = VALID_SESSION_FLOWS.includes(obj.flow) ? obj.flow : 'direct';
   const permission = VALID_SESSION_PERMISSIONS.includes(obj.permission)
     ? obj.permission
     : 'inherit';
   const autoWake = typeof obj.autoWake === 'boolean' ? obj.autoWake : true;
+  const autoReview = typeof obj.autoReview === 'boolean' ? obj.autoReview : true;
   return {
     enabled: Boolean(enabled || hasAnyExternal),
     flow,
     permission,
     autoWake,
+    autoReview,
     codex,
     antigravity,
+    slots,
   };
+}
+
+export function getActiveExternalSlots(routing) {
+  if (!routing || !Array.isArray(routing.slots)) return [];
+  return routing.slots.filter(
+    (s) => (s.mode === 'existing' && Boolean(s.sessionId)) || s.mode === 'new'
+  );
+}
+
+export function resolveRoutingSlot(routing, idOrLabel = '') {
+  if (!routing || !Array.isArray(routing.slots) || routing.slots.length === 0) return null;
+  const raw = String(idOrLabel || '').trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  const exact =
+    routing.slots.find((s) => s.slotId === raw) ||
+    routing.slots.find((s) => s.slotId.toLowerCase() === lower) ||
+    routing.slots.find((s) => (s.label || '').toLowerCase() === lower);
+  if (exact) return exact;
+  if (lower === 'codex' || lower === 'antigravity') {
+    return routing.slots.find((s) => s.provider === lower) || null;
+  }
+  return null;
 }
 
 export function isAgentRoutedExternally(routing, actorId) {
   if (!routing) return false;
+  const resolved = resolveRoutingSlot(routing, actorId);
+  if (resolved) {
+    if (resolved.mode === 'existing' && resolved.sessionId) return true;
+    if (resolved.mode === 'new') return true;
+  }
   const key = actorId === 'codex' ? 'codex' : actorId === 'antigravity' ? 'antigravity' : '';
   if (!key) return false;
+  if (Array.isArray(routing.slots)) {
+    if (
+      routing.slots.some(
+        (s) => s.provider === key && ((s.mode === 'existing' && s.sessionId) || s.mode === 'new')
+      )
+    ) {
+      return true;
+    }
+  }
   const target = routing[key];
   if (!target) return false;
   if (target.mode === 'existing' && target.sessionId) return true;

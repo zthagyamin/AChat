@@ -4696,6 +4696,280 @@ test('33. Dual-skin UI system (workbench + editorial) preserves FOUC-free bootst
   assert.doesNotMatch(css, /transition\s*:[^;]*scrollbar-color/i);
 });
 
+test('34. Multi-session 3+ orchestration: 1 lead + 2 peer parallel exec, selective rework loop, @slot dispatch & per-session serialization', async () => {
+  const os = await import('node:os');
+  const tmpRoot = fs.mkdtempSync(path.join(os.default.tmpdir(), 'achat-multisession-'));
+  const dataDir = path.join(tmpRoot, 'data');
+  const groupsDir = path.join(tmpRoot, 'groups');
+  const codexHome = path.join(tmpRoot, 'codex-home');
+  const agyHome = path.join(tmpRoot, 'agy-home');
+  const projDir = path.join(tmpRoot, 'cr-ai-model');
+  const groupId = 'g_multisession';
+  fs.mkdirSync(path.join(groupsDir, groupId), { recursive: true });
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(agyHome, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+  fs.writeFileSync(path.join(groupsDir, groupId, 'ledger.jsonl'), '', 'utf8');
+
+  const extRunnerCalls = [];
+  let reviewAttemptCount = 0;
+  let activeSharedCount = 0;
+  let maxSharedConcurrency = 0;
+
+  const bridge = new CcccBridge({
+    dataDir,
+    groupsDir,
+    codexHomeDir: codexHome,
+    antigravityDataDir: agyHome,
+    externalSessionRunnerOverride: async (params) => {
+      extRunnerCalls.push({
+        slotId: params.slotId,
+        agent: params.agent,
+        phase: params.phase,
+        sessionId: params.sessionId,
+        prompt: params.prompt,
+      });
+      if (params.sessionId === 'shared-ag-sess') {
+        activeSharedCount += 1;
+        if (activeSharedCount > maxSharedConcurrency) maxSharedConcurrency = activeSharedCount;
+        await new Promise((r) => setTimeout(r, 25));
+        activeSharedCount -= 1;
+      }
+      if (params.phase === 'lead_review') {
+        reviewAttemptCount += 1;
+        if (reviewAttemptCount === 1) {
+          return {
+            ok: true,
+            sessionId: params.sessionId,
+            text:
+              '审查完成：AG-1 训练指标达标通过；AG-2 仍使用 BGR 输入，请仅 AG-2 修改为 RGB。' +
+              '<!--achat-review:{"approved":false,"targets":["agy-2"],"feedback":"请把 BGR 改成 RGB 通道"}-->',
+          };
+        }
+        return {
+          ok: true,
+          sessionId: params.sessionId,
+          text:
+            '复核通过：AG-2 已完成 RGB 对齐且回归达标。' +
+            '<!--achat-review:{"approved":true,"feedback":"全部通过验收"}-->',
+        };
+      }
+      if (params.phase === 'rework') {
+        return {
+          ok: true,
+          sessionId: params.sessionId,
+          text: `${params.slotId} 已按主审意见改完 RGB 通道并测通。`,
+        };
+      }
+      return {
+        ok: true,
+        sessionId: params.sessionId || `${params.slotId}-sess`,
+        text: `${params.slotId} 并行产出已提交。`,
+      };
+    },
+    execCcccOverride: async () => ({ stdout: '{}', stderr: '' }),
+    execJsonOverride: async (args) => {
+      if (args[0] === 'groups') {
+        return { groups: [{ group_id: groupId, title: '皇室战争 AI 模型', running: true }] };
+      }
+      if (args[0] === 'group' && args[1] === 'show') {
+        return {
+          effective_scope: { path: projDir },
+          group: {
+            group_id: groupId,
+            title: '皇室战争 AI 模型',
+            scopes: [{ scope_key: 's1', label: 'proj', url: projDir }],
+            actors: [
+              { id: 'codex', title: 'Codex', runtime: 'codex', command: ['codex'] },
+              { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', command: ['agy'] },
+            ],
+          },
+        };
+      }
+      if (args[0] === 'actor' && args[1] === 'list') {
+        return {
+          actors: [
+            { id: 'codex', title: 'Codex', runtime: 'codex', running: true, enabled: true, command: ['codex'] },
+            { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', running: true, enabled: true, command: ['agy'] },
+          ],
+        };
+      }
+      return {};
+    },
+  });
+
+  try {
+    await bridge.ensureFileHelperSeed();
+    await bridge.readGroupLedger(groupId);
+
+    // 1. Configure 3 slots: 1 Codex lead reviewer + 2 Antigravity peer sessions
+    await bridge.setGroupPrefs(groupId, {
+      sessionRouting: {
+        enabled: true,
+        flow: 'direct',
+        permission: 'workspace-write',
+        autoReview: true,
+        slots: [
+          {
+            slotId: 'codex',
+            provider: 'codex',
+            label: 'Codex',
+            role: 'lead',
+            mode: 'existing',
+            sessionId: 'cx-lead-1',
+            sessionTitle: 'review/cr-eval',
+            cwd: projDir,
+          },
+          {
+            slotId: 'agy-1',
+            provider: 'antigravity',
+            label: 'AG-1·训练',
+            role: 'peer',
+            mode: 'existing',
+            sessionId: 'ag-1-train',
+            sessionTitle: 'feat/ppo-reward',
+            cwd: projDir,
+          },
+          {
+            slotId: 'agy-2',
+            provider: 'antigravity',
+            label: 'AG-2·推理',
+            role: 'peer',
+            mode: 'existing',
+            sessionId: 'ag-2-infer',
+            sessionTitle: 'feat/onnx-infer',
+            cwd: projDir,
+          },
+        ],
+      },
+    });
+
+    // 2. Broadcast task: workers run in parallel -> lead_review rejects only agy-2 -> rework only agy-2 -> lead_review approves
+    await bridge.sendGroupMessage(groupId, {
+      text: '并行优化奖励函数与推理通道，随后由 Codex 验收。',
+      to: ['@all'],
+    });
+
+    for (let i = 0; i < 80; i += 1) {
+      const board = bridge.ideBoards.get(groupId);
+      if (extRunnerCalls.length >= 5 && board?.actors?.codex?.phase === 'done') break;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await new Promise((r) => setTimeout(r, 25));
+
+    assert.equal(extRunnerCalls.length, 5, 'Expected 2 wave-1 peers + lead_review #1 + agy-2 rework + lead_review #2');
+    const wave1Calls = extRunnerCalls.slice(0, 2);
+    assert.deepEqual(
+      new Set(wave1Calls.map((c) => c.slotId)),
+      new Set(['agy-1', 'agy-2']),
+      'Wave 1 should execute both peer worker slots in parallel'
+    );
+    assert.equal(wave1Calls.every((c) => c.phase === 'exec'), true);
+
+    assert.equal(extRunnerCalls[2].slotId, 'codex');
+    assert.equal(extRunnerCalls[2].phase, 'lead_review');
+    assert.equal(extRunnerCalls[2].sessionId, 'cx-lead-1');
+
+    assert.equal(extRunnerCalls[3].slotId, 'agy-2', 'Targeted rework must run ONLY rejected agy-2 (not agy-1)');
+    assert.equal(extRunnerCalls[3].phase, 'rework');
+    assert.match(extRunnerCalls[3].prompt, /请把 BGR 改成 RGB 通道/);
+
+    assert.equal(extRunnerCalls[4].slotId, 'codex');
+    assert.equal(extRunnerCalls[4].phase, 'lead_review');
+
+    const finalBoard = bridge.ideBoards.get(groupId);
+    assert.equal(finalBoard?.actors?.codex?.phase, 'done');
+    assert.equal(finalBoard?.actors?.['agy-1']?.phase, 'done');
+    assert.equal(finalBoard?.actors?.['agy-2']?.phase, 'done');
+
+    const timeline = await bridge.readGroupLedger(groupId);
+    const leakedProtocolTag = timeline.messages.some((m) => String(m.text || '').includes('<!--achat-review:'));
+    assert.equal(leakedProtocolTag, false, 'Internal <!--achat-review:...--> tag must be stripped from visible chat messages');
+
+    // 3. Targeted @slot dispatch routes strictly to AG-1 without auto lead review
+    await bridge.sendGroupMessage(groupId, {
+      text: '@AG-1·训练 只重新导出一次最佳权重',
+      to: ['agy-1'],
+    });
+    for (let i = 0; i < 40 && extRunnerCalls.length < 6; i += 1) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(extRunnerCalls.length, 6, 'Targeted @agy-1 dispatch must execute only agy-1');
+    assert.equal(extRunnerCalls[5].slotId, 'agy-1');
+    assert.equal(extRunnerCalls[5].sessionId, 'ag-1-train');
+
+    // 4. Two slots bound to the exact same external sessionId must serialize execution (concurrency <= 1)
+    await bridge.setGroupPrefs(groupId, {
+      sessionRouting: {
+        enabled: true,
+        flow: 'direct',
+        permission: 'workspace-write',
+        autoReview: false,
+        slots: [
+          { slotId: 'agy-1', provider: 'antigravity', label: 'AG-1', role: 'peer', mode: 'existing', sessionId: 'shared-ag-sess', cwd: projDir },
+          { slotId: 'agy-2', provider: 'antigravity', label: 'AG-2', role: 'peer', mode: 'existing', sessionId: 'shared-ag-sess', cwd: projDir },
+        ],
+      },
+    });
+    await bridge.sendGroupMessage(groupId, {
+      text: '验证同会话并发串行队列',
+      to: ['@all'],
+    });
+    for (let i = 0; i < 60 && extRunnerCalls.length < 8; i += 1) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(extRunnerCalls.length, 8);
+    assert.equal(maxSharedConcurrency, 1, 'Slots targeting the same external sessionId must execute serially');
+  } finally {
+    bridge.stop();
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+test('35. Minimalist UI declutter & multi-session modal contracts comply with Modern Web Guidance', () => {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  const appMjs = fs.readFileSync(new URL('../public/app.mjs', import.meta.url), 'utf8');
+
+  // Header compaction + Native Invoker/Popover triggers + Session Routing Dialog
+  assert.match(html, /id="openSessionRoutingBtn"[^>]*commandfor="sessionRoutingDialog"[^>]*command="show-modal"/);
+  assert.match(html, /id="chatQuickMenuBtn"[^>]*popovertarget="chatQuickMenuPopover"/);
+  assert.match(html, /id="chatQuickMenuPopover"[^>]*popover="auto"/);
+  assert.match(html, /<dialog\s+id="sessionRoutingDialog"[^>]*closedby="any"[^>]*aria-labelledby="srdTitle"/);
+  assert.doesNotMatch(html, /<dialog\s+id="sessionRoutingDialog"[^>]*(?:role="dialog"|aria-modal=)/);
+  assert.doesNotMatch(html, /id="sessionTargetBar"/);
+  assert.match(html, /id="presetOneLeadTwoAgyBtn"/);
+  assert.match(html, /id="addAgySlotBtn"/);
+  assert.match(html, /id="addCodexSlotBtn"/);
+  assert.match(html, /id="autoReviewToggleBtn"/);
+  assert.match(html, /id="itbRetryBtn"/);
+  assert.match(html, /id="itbInterruptBtn"/);
+
+  // CSS: safe <dialog> display scoping ([open] only), details.itb-row accordion & reduced-motion ::details-content, zero-CLS hover
+  assert.doesNotMatch(css, /(?:^|\})\s*(?:dialog|\.session-routing-dialog)\s*\{\s*[^}]*\bdisplay\s*:/m);
+  assert.match(css, /dialog\.session-routing-dialog\[open\]/);
+  assert.match(css, /details\.itb-row/);
+  assert.match(css, /summary\.itb-summary/);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*no-preference\)[\s\S]*?::details-content/);
+  assert.match(css, /@media\s*\(hover:\s*hover\)[\s\S]*?\.star-btn:not\(\.is-starred\)[\s\S]*?opacity:\s*0/);
+  assert.match(css, /@media\s*\(hover:\s*hover\)[\s\S]*?\.msg-actions-bar[\s\S]*?opacity:\s*0/);
+  assert.match(css, /\.stb-preset-panel\[hidden\]\s*\{\s*display:\s*none;/);
+
+  // JS: dynamic multi-slot APIs, accordion rendering preserving open state, auto-hidden typingBanner, zero .msg-insight echo
+  assert.match(appMjs, /function getActiveGroupSlots\(/);
+  assert.match(appMjs, /function updateSlotInGroupRouting\(/);
+  assert.match(appMjs, /function addSlotToGroupRouting\(/);
+  assert.match(appMjs, /function applyPresetOneLeadTwoAgy\(/);
+  assert.match(appMjs, /state\.openIdeSlotDetails/);
+  assert.match(appMjs, /detailsEl\s*=\s*document\.createElement\('details'\)/);
+  assert.doesNotMatch(appMjs, /className\s*=\s*['"][^'"]*msg-insight/);
+});
+
+
 
 
 

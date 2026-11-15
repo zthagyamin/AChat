@@ -12,18 +12,20 @@ export const PHASE_LABELS = Object.freeze({
   aligning: '群内对齐中',
   running: 'IDE 执行中',
   collab: '回群协作中',
+  reviewing: '主审验收中',
+  rework: '按审返修中',
   done: '已完成',
   error: '需处理',
 });
 
 /**
- * Strip hidden `<!--achat-steps:...-->` and `<!--achat-collab:...-->` markers
- * (including incomplete trailing markers during streaming) from display text.
+ * Strip hidden `<!--achat-steps:...-->`, `<!--achat-collab:...-->`, and
+ * `<!--achat-review:...-->` markers (including incomplete trailing markers during streaming).
  */
 export function stripIdeProtocolTags(rawText = '') {
   let out = String(rawText || '');
-  out = out.replace(/<!--\s*achat-(?:steps|collab):[\s\S]*?-->/gi, '');
-  out = out.replace(/<!--\s*achat-(?:steps|collab):[\s\S]*$/gi, '');
+  out = out.replace(/<!--\s*achat-(?:steps|collab|review):[\s\S]*?-->/gi, '');
+  out = out.replace(/<!--\s*achat-(?:steps|collab|review):[\s\S]*$/gi, '');
   return out.replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -112,15 +114,46 @@ export function parseIdeStepsFromText(rawText = '') {
  * Parse a return-to-chat collaboration request from an agent's IDE output.
  * Returns null unless the agent explicitly asks to return to AChat to sync with its peer.
  */
-export function parseCollabSignal(rawText = '', { fromActor = '' } = {}) {
+export function parseCollabSignal(rawText = '', { fromActor = '', validTargets = [] } = {}) {
   const txt = String(rawText || '');
   if (!txt.trim()) return null;
 
+  const targetEntries = Array.isArray(validTargets)
+    ? validTargets
+        .map((t) =>
+          typeof t === 'string'
+            ? { slotId: t, label: t }
+            : t && typeof t === 'object'
+              ? { slotId: String(t.slotId || t.id || ''), label: String(t.label || t.title || '') }
+              : null
+        )
+        .filter((t) => t && t.slotId)
+    : [];
+
   const normalizeTarget = (rawTo = '') => {
-    const lower = String(rawTo || '').trim().toLowerCase();
-    if (lower === 'codex' || lower === 'cx') return 'codex';
-    if (lower === 'antigravity' || lower === 'agy' || lower === 'ag') return 'antigravity';
-    if (lower === 'all' || lower === 'both') return 'all';
+    const clean = String(rawTo || '').trim().replace(/^@/, '');
+    const lower = clean.toLowerCase();
+    if (lower === 'all' || lower === 'both' || lower === '所有人' || lower === '全部会话') {
+      return 'all';
+    }
+    const matched = targetEntries.find(
+      (t) =>
+        t.slotId === clean ||
+        t.slotId.toLowerCase() === lower ||
+        (t.label && t.label.toLowerCase() === lower)
+    );
+    if (matched) return matched.slotId;
+    if (lower === 'codex' || lower === 'cx') {
+      const firstCx = targetEntries.find((t) => t.slotId.toLowerCase().startsWith('codex'));
+      return firstCx ? firstCx.slotId : 'codex';
+    }
+    if (lower === 'antigravity' || lower === 'agy' || lower === 'ag') {
+      const firstAg = targetEntries.find(
+        (t) => t.slotId.toLowerCase() !== 'codex' && !t.slotId.toLowerCase().startsWith('codex')
+      );
+      return firstAg ? firstAg.slotId : 'antigravity';
+    }
+    if (/^[a-zA-Z0-9_-]{1,36}$/.test(clean)) return clean;
     if (fromActor === 'codex') return 'antigravity';
     if (fromActor === 'antigravity') return 'codex';
     return 'all';
@@ -172,29 +205,103 @@ export function parseCollabSignal(rawText = '', { fromActor = '' } = {}) {
 }
 
 /**
- * Extract a concise per-actor subtask label from alignment messages.
+ * Parse a lead reviewer acceptance verdict (`<!--achat-review:...-->`).
  */
-export function extractActorSubtaskHint(alignmentText = '', actorId = '') {
+export function parseReviewVerdict(rawText = '', { validTargets = [] } = {}) {
+  const txt = String(rawText || '');
+  if (!txt.trim()) return null;
+
+  const targetEntries = Array.isArray(validTargets)
+    ? validTargets
+        .map((t) =>
+          typeof t === 'string'
+            ? { slotId: t, label: t }
+            : t && typeof t === 'object'
+              ? { slotId: String(t.slotId || t.id || ''), label: String(t.label || t.title || '') }
+              : null
+        )
+        .filter((t) => t && t.slotId)
+    : [];
+
+  const tagMatches = [...txt.matchAll(/<!--\s*achat-review:([\s\S]*?)-->/gi)];
+  for (let i = tagMatches.length - 1; i >= 0; i -= 1) {
+    try {
+      const parsed = JSON.parse(String(tagMatches[i][1] || '').trim());
+      if (!parsed || typeof parsed.approved !== 'boolean') continue;
+      const rawTargets = Array.isArray(parsed.targets)
+        ? parsed.targets
+        : typeof parsed.target === 'string'
+          ? [parsed.target]
+          : [];
+      const targets = [];
+      for (const rawT of rawTargets) {
+        const clean = String(rawT || '').trim().replace(/^@/, '');
+        if (!clean) continue;
+        const lower = clean.toLowerCase();
+        const found = targetEntries.find(
+          (t) =>
+            t.slotId === clean ||
+            t.slotId.toLowerCase() === lower ||
+            (t.label && t.label.toLowerCase() === lower)
+        );
+        const id = found ? found.slotId : /^[a-zA-Z0-9_-]{1,36}$/.test(clean) ? clean : '';
+        if (id && !targets.includes(id)) targets.push(id);
+      }
+      return {
+        approved: parsed.approved,
+        targets,
+        feedback: String(parsed.feedback || parsed.reason || parsed.summary || '').trim().slice(0, 2400),
+      };
+    } catch {
+      // ignore malformed tag
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract a concise per-actor/slot subtask label from alignment messages.
+ */
+export function extractActorSubtaskHint(alignmentText = '', actorId = '', customLabel = '') {
   const clean = stripIdeProtocolTags(alignmentText);
   if (!clean) return '';
-  const targetLabel = actorId === 'codex' ? 'Codex' : 'Antigravity';
+  const escapeRegExp = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const candidates = [
+    customLabel,
+    actorId,
+    actorId === 'codex' ? 'Codex' : actorId === 'antigravity' ? 'Antigravity' : '',
+  ]
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+  const uniqueCandidates = Array.from(new Set(candidates));
   const lines = clean.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  for (const line of lines) {
-    const match = line.match(
-      new RegExp(`^(?:[-*•\\d.)\\s]*)?(?:【?${targetLabel}(?:\\s*负责)?】?|\\*\\*${targetLabel}[^*]*\\*\\*)\\s*[：:]\\s*(.+)$`, 'i')
+  for (const name of uniqueCandidates) {
+    const escaped = escapeRegExp(name);
+    const re = new RegExp(
+      `^(?:[-*•\\d.)\\s]*)?(?:【?${escaped}(?:\\s*\\([^)]*\\))?(?:\\s*负责)?】?|\\*\\*${escaped}[^*]*\\*\\*)\\s*[：:]\\s*(.+)$`,
+      'i'
     );
-    if (match && match[1]) {
-      return match[1].replace(/\*\*/g, '').trim().slice(0, 110);
+    for (const line of lines) {
+      const match = line.match(re);
+      if (match && match[1]) {
+        return match[1].replace(/\*\*/g, '').trim().slice(0, 110);
+      }
     }
   }
   return '';
 }
 
 export function createActorBoardState(actorId, overrides = {}) {
-  const defaultTitle = actorId === 'codex' ? 'Codex' : actorId === 'antigravity' ? 'Antigravity' : actorId;
+  const inferredProvider = String(actorId || '').toLowerCase().startsWith('codex')
+    ? 'codex'
+    : 'antigravity';
+  const defaultTitle =
+    actorId === 'codex' ? 'Codex' : actorId === 'antigravity' ? 'Antigravity' : actorId;
   const phase = overrides.phase && PHASE_LABELS[overrides.phase] ? overrides.phase : 'idle';
   return {
     actorId,
+    provider: overrides.provider || inferredProvider,
+    role: overrides.role === 'lead' ? 'lead' : 'peer',
     title: overrides.title || defaultTitle,
     phase,
     phaseLabel: overrides.phaseLabel || PHASE_LABELS[phase],
@@ -242,7 +349,7 @@ export function computeIdeBoardFingerprint(ideBoard = null) {
       const a = actors[id] || {};
       const stepsKey = (a.steps || []).map((s) => `${s.status}:${s.title}`).join('|');
       const topAction = a.recentActions?.[0]?.text || '';
-      return `${id}:${a.phase}:${a.round}:${a.currentAction}:${stepsKey}:${topAction}:${a.lastActivityAt}`;
+      return `${id}:${a.role || 'peer'}:${a.title || ''}:${a.phase}:${a.round}:${a.currentAction}:${stepsKey}:${topAction}:${a.lastActivityAt}`;
     });
   return `${ideBoard.taskTitle || ''}|${ideBoard.round || 0}|${ideBoard.stageText || ''}|${parts.join(';')}`;
 }

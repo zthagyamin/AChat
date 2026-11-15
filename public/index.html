@@ -195,20 +195,30 @@
           </div>
 
           <div class="chat-header-actions no-drag">
-            <button id="pinSessionBtn" class="icon-action-btn pin-session-btn" type="button" title="置顶当前会话" aria-label="置顶当前会话" aria-pressed="false">
-              <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
-                <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9 4h6l-1 6 3 3H7l3-3-1-6zm3 9v7"/>
+            <button
+              id="openSessionRoutingBtn"
+              class="header-pill-btn"
+              type="button"
+              commandfor="sessionRoutingDialog"
+              command="show-modal"
+              title="多会话编排与绑定：支持同时接入 Codex 主审与多个 Antigravity 子会话"
+            >
+              会话
+            </button>
+            <button
+              id="chatQuickMenuBtn"
+              class="icon-action-btn"
+              type="button"
+              popovertarget="chatQuickMenuPopover"
+              title="会话快捷选项（置顶 / 远程桌面 / 文风 / 档位）"
+              aria-label="会话快捷选项"
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M4 7h10M18 7h2M4 12h4M12 12h8M4 17h12M20 17h0"/>
+                <circle cx="16" cy="7" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                <circle cx="10" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                <circle cx="18" cy="17" r="2" fill="none" stroke="currentColor" stroke-width="1.8"/>
               </svg>
-            </button>
-            <button id="openComputerPreviewBtn" class="style-pill computer-pill" type="button" commandfor="computerPreviewDialog" command="show-modal" aria-label="实时桌面画面" title="实时查看宿主电脑桌面画面（支持手机端远程监看与一键抓图贴入聊天）">
-              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M8 20h8M12 16v4"/></svg>
-              <span class="pill-text-desktop">桌面</span>
-            </button>
-            <button id="replyStyleBtn" class="style-pill is-plain" type="button" title="一键切换回复通俗/专业程度：人话精简 → 适中清晰 → 专业深度">
-              人话
-            </button>
-            <button id="speedGearBtn" class="gear-pill is-fast" type="button" title="一键切换当前群聊模型响应速度档位">
-              极速
             </button>
             <button id="toggleDrawerBtn" class="icon-action-btn" type="button" title="聊天信息与 Agent 控制" aria-label="聊天信息" aria-expanded="false">
               <svg viewBox="0 0 24 24" width="20" height="20">
@@ -219,6 +229,31 @@
             </button>
           </div>
         </header>
+
+        <!-- Secondary Header Quick Actions Popover (content-first-noise-reduction) -->
+        <div id="chatQuickMenuPopover" popover="auto" class="composer-more-popover chat-quick-menu-popover" aria-label="会话快捷菜单">
+          <div class="cmp-title">会话控制与偏好</div>
+          <div class="cqm-list">
+            <button id="pinSessionBtn" class="cqm-item-btn pin-session-btn" type="button" title="置顶当前会话" aria-label="置顶当前会话" aria-pressed="false">
+              <span>置顶当前会话</span>
+            </button>
+            <button id="openComputerPreviewBtn" class="cqm-item-btn style-pill computer-pill" type="button" commandfor="computerPreviewDialog" command="show-modal" aria-label="实时桌面画面" title="实时查看宿主电脑桌面画面（支持手机端远程监看与一键抓图贴入聊天）">
+              <span>🖥 宿主实时桌面画面</span>
+            </button>
+            <div class="cqm-split-row">
+              <span class="cqm-label">回答文风</span>
+              <button id="replyStyleBtn" class="style-pill is-plain" type="button" title="一键切换回复通俗/专业程度：人话精简 → 适中清晰 → 专业深度">
+                人话
+              </button>
+            </div>
+            <div class="cqm-split-row">
+              <span class="cqm-label">响应档位</span>
+              <button id="speedGearBtn" class="gear-pill is-fast" type="button" title="一键切换当前群聊模型响应速度档位">
+                极速
+              </button>
+            </div>
+          </div>
+        </div>
 
         <div class="chat-body-split">
           <div class="chat-main-column">
@@ -232,6 +267,8 @@
                 </div>
                 <div class="itb-header-right">
                   <span id="itbRoundPill" class="itb-round-pill" hidden>第 1 轮</span>
+                  <button id="itbRetryBtn" class="itb-ctrl-btn" type="button" hidden title="重试当前卡住的轮次">↻ 重试</button>
+                  <button id="itbInterruptBtn" class="itb-ctrl-btn is-danger" type="button" hidden title="中断当前正在执行的轮次">■ 中断</button>
                   <button id="itbToggleBtn" class="itb-toggle-btn" type="button" aria-expanded="true">收起看板</button>
                 </div>
               </div>
@@ -313,11 +350,12 @@
                     id="targetSessionToggleBtn"
                     class="recip-chip reply-pill target-session-pill"
                     type="button"
-                    aria-expanded="false"
-                    aria-controls="sessionTargetBar"
-                    title="指定具体会话派发任务：可直接选本机 Codex / Antigravity 现有会话或在项目目录新建会话"
+                    commandfor="sessionRoutingDialog"
+                    command="show-modal"
+                    aria-controls="sessionRoutingDialog"
+                    title="多会话编排与绑定：支持同时接入 2–8 个 Codex / Antigravity 会话并设置主审"
                   >
-                    目标会话
+                    会话
                   </button>
                   <button
                     id="composerMoreBtn"
@@ -361,7 +399,7 @@
                       <small>附带文档或源码路径</small>
                     </span>
                   </button>
-                  <button id="sharedCtxBtn" class="cmp-item-btn is-active" type="button" aria-pressed="true" title="开启后自动同步本群最近发言，让 Codex 和 Antigravity 也能看到彼此刚对你说的话">
+                  <button id="sharedCtxBtn" class="cmp-item-btn is-active" type="button" aria-pressed="true" title="开启后自动同步本群最近发言，让各会话也能看到彼此刚对你说的话">
                     <span class="cmp-item-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="13" height="13"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M10 13a5 5 0 0 0 7.07 0l2.12-2.12a5 5 0 0 0-7.07-7.07L10.9 5M14 11a5 5 0 0 0-7.07 0l-2.12 2.12a5 5 0 0 0 7.07 7.07L13.1 19"/></svg></span>
                     <span class="cmp-item-text">
                       <strong>成员上下文互通</strong>
@@ -377,135 +415,7 @@
                   </button>
                 </div>
               </div>
-
-              <!-- Target Session & Collapsible Preset Selector Bar -->
-              <section id="sessionTargetBar" class="session-target-bar" aria-label="目标会话与协作权限选择" hidden>
-                <div class="stb-header">
-                  <div class="stb-header-left">
-                    <span class="stb-summary-title">目标 IDE 会话</span>
-                    <span id="sessionPresetSummary" class="stb-preset-summary">直达 · 沿用原权限 · 自动唤醒开</span>
-                  </div>
-                  <div class="stb-header-right">
-                    <input
-                      id="sessionFilterInput"
-                      name="session_filter"
-                      class="stb-search-input"
-                      type="search"
-                      autocorrect="off"
-                      autocapitalize="off"
-                      spellcheck="false"
-                      aria-label="按关键词过滤目标会话"
-                      placeholder="搜会话 / 项目名…"
-                    >
-                    <button id="refreshExtSessionsBtn" class="stb-mini-btn" type="button" title="重新扫描本机最新打开的 Codex 与 Antigravity 会话">
-                      刷新
-                    </button>
-                    <button
-                      id="toggleSessionPresetsBtn"
-                      class="stb-mini-btn"
-                      type="button"
-                      aria-expanded="false"
-                      aria-controls="sessionPresetPanel"
-                      title="展开或收起流转模式、读写权限与自动唤醒预设"
-                    >
-                      预设
-                    </button>
-                    <button id="resetSessionRoutingBtn" class="stb-mini-btn is-reset" type="button" hidden title="一键恢复为本群默认会话">
-                      ↺ 默认
-                    </button>
-                  </div>
-                </div>
-
-                <div id="sessionPresetPanel" class="stb-preset-panel" hidden>
-                  <div id="sessionFlowSeg" class="stb-seg" role="group" aria-label="任务派发流向">
-                    <button type="button" class="stb-seg-btn is-active" data-session-flow="direct" title="直达指定会话：发消息后直接同时送入下方选定的具体会话执行">
-                      直达会话
-                    </button>
-                    <button type="button" class="stb-seg-btn" data-session-flow="discuss_then_exec" title="先商量再派入 IDE：先在群内对齐分工，随后派入下方选定的具体会话执行，需要协作时再回群沟通">
-                      先聊再派 IDE
-                    </button>
-                  </div>
-                  <div id="sessionPermSeg" class="stb-seg" role="group" aria-label="目标会话文件读写权限">
-                    <button type="button" class="stb-seg-btn is-active" data-session-perm="inherit" title="已有会话默认沿用原会话自身权限，新建会话沿用本群默认设置">
-                      沿用原权限
-                    </button>
-                    <button type="button" class="stb-seg-btn is-write" data-session-perm="workspace-write" title="允许目标会话直接创建和修改项目代码文件">
-                      允许改代码
-                    </button>
-                    <button type="button" class="stb-seg-btn is-ro" data-session-perm="read-only" title="仅限只读分析与审查，禁止改动任何本地文件">
-                      只读分析
-                    </button>
-                  </div>
-                  <button
-                    id="autoWakeToggleBtn"
-                    class="stb-mini-btn is-primary-tint"
-                    type="button"
-                    aria-pressed="true"
-                    title="长任务自动唤醒机制：遇到 10 分钟静默断连自动同会话续跑（最多 3 次），且在无人值守长任务中阶段未完自动接力推进"
-                  >
-                    自动唤醒 · 开
-                  </button>
-                </div>
-
-                <div class="stb-grid">
-                  <div class="stb-slot">
-                    <div class="stb-slot-top">
-                      <label for="codexSessionSelect" class="stb-label">
-                        <span class="stb-agent-dot is-cx">Cx</span>
-                        Codex 目标会话
-                      </label>
-                      <div class="stb-slot-meta">
-                        <span id="codexSessionHint" class="stb-slot-hint">本群默认</span>
-                        <button id="codexPreviewBtn" class="stb-preview-btn" type="button" hidden title="预览该 Codex 会话最近聊天内容，防止选错会话">👁 预览</button>
-                      </div>
-                    </div>
-                    <select id="codexSessionSelect" name="codex_target_session" class="stb-select"></select>
-                    <div id="codexNewDirRow" class="stb-dir-row" hidden>
-                      <input
-                        id="codexNewDirInput"
-                        name="codex_new_cwd"
-                        class="stb-dir-input"
-                        type="text"
-                        list="recentProjectDirsList"
-                        autocorrect="off"
-                        autocapitalize="off"
-                        spellcheck="false"
-                        placeholder="输入或选择新建 Codex 会话的项目文件夹路径…"
-                      >
-                      <button id="codexPickDirBtn" class="stb-dir-btn" type="button" hidden>📂 浏览</button>
-                    </div>
-                  </div>
-
-                  <div class="stb-slot">
-                    <div class="stb-slot-top">
-                      <label for="agySessionSelect" class="stb-label">
-                        <span class="stb-agent-dot is-ag">Ag</span>
-                        Antigravity 目标会话
-                      </label>
-                      <div class="stb-slot-meta">
-                        <span id="agySessionHint" class="stb-slot-hint">本群默认</span>
-                        <button id="agyPreviewBtn" class="stb-preview-btn" type="button" hidden title="预览该 Antigravity 会话最近聊天内容，防止选错会话">👁 预览</button>
-                      </div>
-                    </div>
-                    <select id="agySessionSelect" name="agy_target_session" class="stb-select"></select>
-                    <div id="agyNewDirRow" class="stb-dir-row" hidden>
-                      <input
-                        id="agyNewDirInput"
-                        name="agy_new_cwd"
-                        class="stb-dir-input"
-                        type="text"
-                        list="recentProjectDirsList"
-                        autocorrect="off"
-                        autocapitalize="off"
-                        spellcheck="false"
-                        placeholder="输入或选择新建 Antigravity 会话的项目文件夹路径…"
-                      >
-                      <button id="agyPickDirBtn" class="stb-dir-btn" type="button" hidden>📂 浏览</button>
-                    </div>
-                  </div>
-                </div>
-                <datalist id="recentProjectDirsList"></datalist>
-              </section>
+              <datalist id="recentProjectDirsList"></datalist>
 
               <!-- Queued Next-Turn Messages Strip (while Agents are thinking) -->
               <div id="queuedTurnBar" class="queued-turn-bar" hidden>
@@ -531,10 +441,10 @@
                   id="messageInput"
                   class="composer-textarea scroller"
                   rows="2"
-                  placeholder="输入消息，支持 @成员、/快捷指令、Ctrl+V 粘贴截图（Enter 发送，Shift+Enter 换行）"
+                  placeholder="输入消息，@ 指定会话，/ 调指令…"
                 ></textarea>
                 <div class="composer-send-bar">
-                  <span id="composerSendHint" class="send-hint">Ctrl+K 速切 · / 指令 · Ctrl+V 贴图 · Enter 发送</span>
+                  <span id="composerSendHint" class="send-hint">Enter 发送 · Shift+Enter 换行</span>
                   <div class="send-btn-group">
                     <button id="queueMsgBtn" class="queue-msg-btn" type="button" hidden title="Agent 正在思考：将此消息排入下一轮，等当前轮回复完自动发出 (Alt+Enter)">
                       排入下一轮
@@ -942,6 +852,115 @@
       <footer class="dialog-footer">
         <button id="sessionPreviewOpenDirBtn" type="button" class="btn-secondary" hidden>📂 打开项目目录</button>
         <button type="button" class="btn-primary" commandfor="sessionPreviewDialog" command="close">确认无误</button>
+      </footer>
+    </div>
+  </dialog>
+
+  <!-- Modal 10.5: Multi-Session Routing & Supervision Modal (closedby="any", modern-web-guidance dialog) -->
+  <dialog id="sessionRoutingDialog" class="wc-dialog session-routing-dialog" closedby="any" aria-labelledby="srdTitle">
+    <div class="dialog-inner srd-inner">
+      <header class="dialog-header">
+        <div class="git-diff-titles">
+          <h2 id="srdTitle">多会话编排与绑定</h2>
+          <p class="srd-sub">支持同时绑定 2–8 个 Codex / Antigravity 会话；设为「主审」的会话将在子会话全部完成后自动分析审查并只打回未通过项。</p>
+        </div>
+        <button type="button" class="dialog-close" commandfor="sessionRoutingDialog" command="close" aria-label="关闭">×</button>
+      </header>
+
+      <div class="srd-toolbar">
+        <div class="srd-search-wrap">
+          <input
+            id="sessionFilterInput"
+            name="session_filter"
+            class="stb-search-input srd-search-input"
+            type="search"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-label="按关键词过滤目标会话"
+            placeholder="搜项目文件夹或会话标题…"
+          >
+          <button id="refreshExtSessionsBtn" class="stb-mini-btn" type="button" title="重新扫描本机最新打开的 Codex 与 Antigravity 会话">
+            刷新会话
+          </button>
+        </div>
+        <div class="srd-toolbar-actions">
+          <button
+            id="presetOneLeadTwoAgyBtn"
+            class="stb-mini-btn is-primary-tint"
+            type="button"
+            title="一键配置常见分工：1 个 Codex 主审分析验收 + 2 个 Antigravity 子会话并行实现"
+          >
+            ⚡ 1 Codex 主审 + 2 Antigravity 子会话
+          </button>
+          <button
+            id="toggleSessionPresetsBtn"
+            class="stb-mini-btn"
+            type="button"
+            aria-expanded="false"
+            aria-controls="sessionPresetPanel"
+            title="展开或收起流转模式、读写权限与自动验收/唤醒策略"
+          >
+            协作策略
+          </button>
+          <button id="resetSessionRoutingBtn" class="stb-mini-btn is-reset" type="button" hidden title="一键恢复为本群默认会话">
+            ↺ 恢复默认
+          </button>
+        </div>
+      </div>
+
+      <div id="sessionPresetPanel" class="stb-preset-panel" hidden>
+        <div class="srd-preset-meta">
+          <span id="sessionPresetSummary" class="stb-preset-summary">直达 · 沿用原权限 · 自动验收开 · 自动唤醒开</span>
+        </div>
+        <div id="sessionFlowSeg" class="stb-seg" role="group" aria-label="任务派发流向">
+          <button type="button" class="stb-seg-btn is-active" data-session-flow="direct" title="直达指定会话：发消息后直接同时送入下方选定的具体会话执行">
+            直达会话
+          </button>
+          <button type="button" class="stb-seg-btn" data-session-flow="discuss_then_exec" title="先商量再派入 IDE：先在群内对齐分工，随后派入下方选定的具体会话执行">
+            先聊再派 IDE
+          </button>
+        </div>
+        <div id="sessionPermSeg" class="stb-seg" role="group" aria-label="目标会话文件读写权限">
+          <button type="button" class="stb-seg-btn is-active" data-session-perm="inherit" title="已有会话默认沿用原会话自身权限，新建会话沿用本群默认设置">
+            沿用原权限
+          </button>
+          <button type="button" class="stb-seg-btn is-write" data-session-perm="workspace-write" title="允许目标会话直接创建和修改项目代码文件">
+            允许改代码
+          </button>
+          <button type="button" class="stb-seg-btn is-ro" data-session-perm="read-only" title="仅限只读分析与审查，禁止改动任何本地文件">
+            只读分析
+          </button>
+        </div>
+        <button
+          id="autoReviewToggleBtn"
+          class="stb-mini-btn is-primary-tint"
+          type="button"
+          aria-pressed="true"
+          title="存在主审槽位且群发任务时，所有子会话执行完毕后自动由主审会话分析审查并验收"
+        >
+          主审自动验收 · 开
+        </button>
+        <button
+          id="autoWakeToggleBtn"
+          class="stb-mini-btn is-primary-tint"
+          type="button"
+          aria-pressed="true"
+          title="长任务自动唤醒机制：遇到静默断连自动同会话续跑，且阶段未完自动接力推进"
+        >
+          自动唤醒 · 开
+        </button>
+      </div>
+
+      <div id="sessionSlotsList" class="srd-slots-list scroller"></div>
+
+      <footer class="dialog-footer srd-footer">
+        <div class="srd-add-group">
+          <button id="addAgySlotBtn" class="mini-btn" type="button">+ 添加 Antigravity 会话</button>
+          <button id="addCodexSlotBtn" class="mini-btn" type="button">+ 添加 Codex 会话</button>
+          <span id="srdSlotCountHint" class="srd-count-hint"></span>
+        </div>
+        <button type="button" class="btn-primary" commandfor="sessionRoutingDialog" command="close">完成</button>
       </footer>
     </div>
   </dialog>
