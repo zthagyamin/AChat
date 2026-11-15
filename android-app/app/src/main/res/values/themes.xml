@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AChat" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">@color/achat_primary</item>
+        <item name="colorPrimaryVariant">@color/achat_primary_pressed</item>
+        <item name="colorSecondary">@color/achat_accent_cyan</item>
+        <item name="android:statusBarColor">@color/achat_header_bar</item>
+        <item name="android:navigationBarColor">@color/achat_page_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/achat_page_bg</item>
+    </style>
+</resources>

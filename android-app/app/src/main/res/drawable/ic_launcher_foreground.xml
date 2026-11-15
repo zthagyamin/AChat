@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Centered inside Adaptive 66dp circular safe zone (R_max = 31.6dp < 33dp) -->
+    <group
+        android:scaleX="0.32"
+        android:scaleY="0.32"
+        android:translateX="13.04"
+        android:translateY="13.36">
+
+        <!-- 1. Left Ice-Platinum Slanted Pillar (with parallel negative-space apex cut) -->
+        <path android:pathData="M58.73,184.15L109.42,69.20L125.27,105.14L85.27,195.85A14.5,14.5 0 0,1 58.73,184.15Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:endX="133.12"
+                    android:endY="209.92"
+                    android:startX="64.0"
+                    android:startY="46.08"
+                    android:type="linear">
+                    <item
+                        android:color="#FFFFFF"
+                        android:offset="0.0" />
+                    <item
+                        android:color="#F1F5F9"
+                        android:offset="0.65" />
+                    <item
+                        android:color="#CBD5E1"
+                        android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- 2. Cyber-Cyan Signal Crossbar (with parallel negative-space left cut) -->
+        <path android:pathData="M117.56,135L168,135L168,157L107.86,157Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:endX="204.8"
+                    android:endY="209.92"
+                    android:startX="115.2"
+                    android:startY="46.08"
+                    android:type="linear">
+                    <item
+                        android:color="#7DD3FC"
+                        android:offset="0.0" />
+                    <item
+                        android:color="#38BDF8"
+                        android:offset="0.45" />
+                    <item
+                        android:color="#0284C7"
+                        android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- 3. Right Cyber-Cyan Slanted Pillar -->
+        <path android:pathData="M114.73,68.85A14.5,14.5 0 0,1 141.27,57.15L197.27,184.15A14.5,14.5 0 0,1 170.73,195.85Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:endX="204.8"
+                    android:endY="209.92"
+                    android:startX="115.2"
+                    android:startY="46.08"
+                    android:type="linear">
+                    <item
+                        android:color="#7DD3FC"
+                        android:offset="0.0" />
+                    <item
+                        android:color="#38BDF8"
+                        android:offset="0.45" />
+                    <item
+                        android:color="#0284C7"
+                        android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

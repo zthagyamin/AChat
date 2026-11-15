@@ -1,0 +1,28 @@
+{
+  "name": "agent-wechat",
+  "productName": "AChat",
+  "version": "3.0.0",
+  "description": "AChat (AgentChat) v3.0 — Desktop, Web & Android Multi-Agent IDE Collaboration Platform",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zthagyamin/AChat.git"
+  },
+  "homepage": "https://github.com/zthagyamin/AChat#readme",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "web": "node server/index.mjs",
+    "test": "node --test test/bridge-realtime.test.mjs"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.4",
+    "katex": "^0.19.1",
+    "marked": "^15.0.7",
+    "mermaid": "^12.3.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}

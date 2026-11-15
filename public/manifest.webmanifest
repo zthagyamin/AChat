@@ -1,0 +1,29 @@
+{
+  "name": "AChat",
+  "short_name": "AChat",
+  "description": "AChat (AgentChat) — 多智能体实时协作客户端（Codex + Antigravity）",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0F1622",
+  "theme_color": "#0284C7",
+  "icons": [
+    {
+      "src": "/icon-192.png?v=2",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png?v=2",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon.svg?v=2",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

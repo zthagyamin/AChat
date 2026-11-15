@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="acBg" x1="8%" y1="6%" x2="92%" y2="94%">
+      <stop offset="0%" stop-color="#1D283A"/>
+      <stop offset="48%" stop-color="#0F1622"/>
+      <stop offset="100%" stop-color="#080C14"/>
+    </linearGradient>
+    <radialGradient id="acGlow" cx="68%" cy="28%" r="48%">
+      <stop offset="0%" stop-color="#0EA5E9" stop-opacity="0.24"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="acWhite" x1="25%" y1="18%" x2="52%" y2="82%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="65%" stop-color="#F1F5F9"/>
+      <stop offset="100%" stop-color="#CBD5E1"/>
+    </linearGradient>
+    <linearGradient id="acCyan" x1="45%" y1="18%" x2="80%" y2="82%">
+      <stop offset="0%" stop-color="#7DD3FC"/>
+      <stop offset="45%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+    <mask id="leftTrim">
+      <rect width="256" height="256" fill="#FFFFFF"/>
+      <line x1="128" y1="63" x2="184" y2="190" stroke="#000000" stroke-width="39" stroke-linecap="round"/>
+    </mask>
+    <mask id="barTrim">
+      <rect width="256" height="256" fill="#FFFFFF"/>
+      <line x1="72" y1="190" x2="128" y2="63" stroke="#000000" stroke-width="39" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <rect x="14" y="14" width="228" height="228" rx="53" fill="url(#acBg)"/>
+  <rect x="14" y="14" width="228" height="228" rx="53" fill="url(#acGlow)"/>
+  <rect x="15.5" y="15.5" width="225" height="225" rx="51.5" fill="none" stroke="#7DD3FC" stroke-opacity="0.28" stroke-width="2.5"/>
+  <!-- Left Platinum Leg -->
+  <line x1="72" y1="190" x2="128" y2="63" stroke="url(#acWhite)" stroke-width="29" stroke-linecap="round" mask="url(#leftTrim)"/>
+  <!-- Cyber Cyan Signal Crossbar -->
+  <line x1="95" y1="146" x2="166" y2="146" stroke="url(#acCyan)" stroke-width="22" stroke-linecap="round" mask="url(#barTrim)"/>
+  <!-- Right Cyber Cyan Leg -->
+  <line x1="128" y1="63" x2="184" y2="190" stroke="url(#acCyan)" stroke-width="29" stroke-linecap="round"/>
+</svg>

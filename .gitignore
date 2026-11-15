@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Local runtime state, tokens, invite codes, beacons & chat logs
+data/
+
+# Local Windows launcher shortcuts
+*.lnk
+
+# Built APK / installer artifacts (tracked via GitHub Releases if needed)
+releases/
+*.apk
+*.aab
+*.apks
+*.idsig
+
+# Environment & logs
+.env
+.env.*
+!.env.example
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Android local build cache, SDK config & release signing credentials
+android-app/.gradle/
+android-app/.idea/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+android-app/keystore/
+*.jks
+*.keystore
+keystore.properties

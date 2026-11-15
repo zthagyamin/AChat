@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="achat_obsidian">#0F1622</color>
+    <color name="achat_nav_dark">#0D1117</color>
+    <color name="achat_primary">#0284C7</color>
+    <color name="achat_primary_pressed">#0369A1</color>
+    <color name="achat_primary_disabled">#93C5FD</color>
+    <color name="achat_accent_text">#0369A1</color>
+    <color name="achat_accent_cyan">#0EA5E9</color>
+    <color name="achat_soft_bg">#F0F9FF</color>
+    <color name="achat_chip_bg">#E0F2FE</color>
+    <color name="achat_header_bar">#F1F5F9</color>
+    <color name="achat_page_bg">#F1F5F9</color>
+    <color name="achat_card_white">#FFFFFF</color>
+    <color name="achat_text_primary">#0F172A</color>
+    <color name="achat_text_secondary">#475569</color>
+    <color name="achat_text_muted">#64748B</color>
+    <color name="achat_border">#E2E8F0</color>
+    <color name="achat_danger">#DC2626</color>
+    <color name="ic_launcher_background">#0F1622</color>
+</resources>

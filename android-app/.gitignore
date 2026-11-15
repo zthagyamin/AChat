@@ -1,0 +1,17 @@
+# Gradle & Android Studio build outputs
+.gradle/
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+.idea/
+*.iml
+
+# Local machine SDK path & signing secrets (NEVER commit credentials)
+local.properties
+keystore/*.jks
+keystore/*.keystore
+keystore/keystore.properties
+*.apk
+*.aab

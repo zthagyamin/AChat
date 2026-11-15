@@ -1,0 +1,512 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/achat_header_bar">
+
+    <!-- Layer 1: Fullscreen AChat Web Stage -->
+    <FrameLayout
+        android:id="@+id/webStageContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/achat_page_bg">
+
+        <WebView
+            android:id="@+id/webView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:focusable="true"
+            android:focusableInTouchMode="true" />
+
+        <ProgressBar
+            android:id="@+id/topProgressBar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="2dp"
+            android:layout_gravity="top"
+            android:max="100"
+            android:progressTint="@color/achat_accent_cyan"
+            android:visibility="gone" />
+
+        <!-- Subtle Edge-Docked Quick Switch Pill (Draggable vertically, tap for Server Menu) -->
+        <LinearLayout
+            android:id="@+id/floatingQuickPill"
+            android:layout_width="wrap_content"
+            android:layout_height="30dp"
+            android:layout_gravity="end|top"
+            android:layout_marginTop="52dp"
+            android:background="@drawable/bg_floating_pill"
+            android:elevation="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="9dp"
+            android:paddingEnd="8dp"
+            android:visibility="gone">
+
+            <View
+                android:layout_width="6dp"
+                android:layout_height="6dp"
+                android:layout_marginEnd="5dp"
+                android:background="@drawable/bg_dot_online" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="线路"
+                android:textColor="@color/achat_text_primary"
+                android:textSize="11.5sp" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Layer 2: Native Graceful Offline / Reconnecting Overlay -->
+    <FrameLayout
+        android:id="@+id/offlineOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/achat_page_bg"
+        android:clickable="true"
+        android:focusable="true"
+        android:padding="22dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:background="@drawable/bg_card_white"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="24dp">
+
+            <ImageView
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:contentDescription="连接已断开"
+                android:src="@drawable/ic_offline_wifi" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:text="连接已断开"
+                android:textColor="@color/achat_text_primary"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/offlineEndpointText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center"
+                android:textColor="@color/achat_text_secondary"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/offlineReasonText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center"
+                android:lineSpacingExtra="2dp"
+                android:text="无法访问电脑端 AChat 服务，请确认电脑已启动应用且手机处于同一 Wi-Fi、Tailscale 或远程隧道网络。"
+                android:textColor="@color/achat_text_muted"
+                android:textSize="12.5sp" />
+
+            <TextView
+                android:id="@+id/offlineAutoProbeText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:background="@drawable/bg_chip_tag"
+                android:paddingStart="12dp"
+                android:paddingTop="5dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="5dp"
+                android:text="正在后台每 4 秒自动探测重连…"
+                android:textColor="@color/achat_accent_text"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/btnRetryNow"
+                android:layout_width="match_parent"
+                android:layout_height="44dp"
+                android:layout_marginTop="18dp"
+                android:background="@drawable/bg_btn_primary"
+                android:stateListAnimator="@null"
+                android:text="立即重试连接"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnSwitchServerFromOffline"
+                android:layout_width="match_parent"
+                android:layout_height="42dp"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_btn_secondary"
+                android:stateListAnimator="@null"
+                android:text="切换服务器地址（Wi-Fi / 远程）"
+                android:textAllCaps="false"
+                android:textColor="@color/achat_text_primary"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Layer 3: Native Obsidian & Cyber-Blue Connection Onboarding & Multi-Server Manager -->
+    <ScrollView
+        android:id="@+id/onboardingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/achat_page_bg"
+        android:clickable="true"
+        android:fillViewport="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="18dp"
+            android:paddingTop="14dp"
+            android:paddingEnd="18dp"
+            android:paddingBottom="28dp">
+
+            <!-- Top Action Row -->
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="start|center_vertical"
+                    android:text="AChat · AgentChat 多智能体协作"
+                    android:textColor="@color/achat_text_muted"
+                    android:textSize="12.5sp" />
+
+                <TextView
+                    android:id="@+id/btnCloseOnboarding"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="end|center_vertical"
+                    android:background="@drawable/bg_chip_tag"
+                    android:paddingStart="12dp"
+                    android:paddingTop="5dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="5dp"
+                    android:text="返回会话"
+                    android:textColor="@color/achat_accent_text"
+                    android:textSize="12.5sp"
+                    android:visibility="gone" />
+            </FrameLayout>
+
+            <!-- Brand Header -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <ImageView
+                    android:layout_width="58dp"
+                    android:layout_height="58dp"
+                    android:contentDescription="@string/app_name"
+                    android:src="@drawable/ic_brand_badge" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="连接电脑端 AChat"
+                    android:textColor="@color/achat_text_primary"
+                    android:textSize="19sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center"
+                    android:text="首次配对后自动记忆口令与云信标，下次打开零配置直达"
+                    android:textColor="@color/achat_text_secondary"
+                    android:textSize="12.5sp" />
+            </LinearLayout>
+
+            <!-- Card 1: One-Tap Clipboard & Full Pairing Link -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:background="@drawable/bg_card_white"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="方式一：粘贴电脑端完整配对链接（推荐）"
+                    android:textColor="@color/achat_text_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="在电脑端左下角点击「手机连接 → 复制链接」，发到手机后一键识别："
+                    android:textColor="@color/achat_text_muted"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnPasteClipboard"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_btn_outline"
+                    android:stateListAnimator="@null"
+                    android:text="从系统剪贴板一键粘贴识别链接"
+                    android:textAllCaps="false"
+                    android:textColor="@color/achat_accent_text"
+                    android:textSize="13.5sp"
+                    android:textStyle="bold" />
+
+                <EditText
+                    android:id="@+id/inputFullPairUrl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_input_box"
+                    android:hint="或在此粘贴配对链接 (含 token / beacon)"
+                    android:imeOptions="actionDone"
+                    android:importantForAutofill="no"
+                    android:inputType="textUri|textMultiLine"
+                    android:maxLines="3"
+                    android:minHeight="42dp"
+                    android:paddingStart="12dp"
+                    android:paddingTop="9dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="9dp"
+                    android:textColor="@color/achat_text_primary"
+                    android:textColorHint="@color/achat_text_muted"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- Card 2: Host:Port, Token & Preset Label -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card_white"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="方式二：填写电脑地址与访问口令"
+                    android:textColor="@color/achat_text_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="电脑 IP : 端口（默认端口 8866）或远程域名"
+                    android:textColor="@color/achat_text_secondary"
+                    android:textSize="12.5sp" />
+
+                <EditText
+                    android:id="@+id/inputHostPort"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:layout_marginTop="5dp"
+                    android:background="@drawable/bg_input_box"
+                    android:hint="例如 192.168.1.73:8866 或 https://xxxx.lhr.life"
+                    android:imeOptions="actionNext"
+                    android:importantForAutofill="no"
+                    android:inputType="textUri"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:singleLine="true"
+                    android:textColor="@color/achat_text_primary"
+                    android:textColorHint="@color/achat_text_muted"
+                    android:textSize="13.5sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="访问口令 Token"
+                    android:textColor="@color/achat_text_secondary"
+                    android:textSize="12.5sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:layout_marginTop="5dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <EditText
+                        android:id="@+id/inputToken"
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_input_box"
+                        android:hint="粘贴电脑端配对链接中的 token"
+                        android:imeOptions="actionNext"
+                        android:importantForAutofill="no"
+                        android:inputType="textPassword"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:singleLine="true"
+                        android:textColor="@color/achat_text_primary"
+                        android:textColorHint="@color/achat_text_muted"
+                        android:textSize="13.5sp" />
+
+                    <TextView
+                        android:id="@+id/btnToggleTokenVisible"
+                        android:layout_width="54dp"
+                        android:layout_height="match_parent"
+                        android:layout_marginStart="6dp"
+                        android:background="@drawable/bg_btn_secondary"
+                        android:gravity="center"
+                        android:text="显示"
+                        android:textColor="@color/achat_text_secondary"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="线路备注（方便多网络一键切换）"
+                    android:textColor="@color/achat_text_secondary"
+                    android:textSize="12.5sp" />
+
+                <EditText
+                    android:id="@+id/inputLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="5dp"
+                    android:background="@drawable/bg_input_box"
+                    android:hint="例如：异地远程自动寻址 / 家里 Wi-Fi"
+                    android:imeOptions="actionDone"
+                    android:importantForAutofill="no"
+                    android:inputType="text"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:singleLine="true"
+                    android:textColor="@color/achat_text_primary"
+                    android:textColorHint="@color/achat_text_muted"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/chipHomeWifi"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_chip_tag"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="家里 Wi-Fi"
+                        android:textColor="@color/achat_accent_text"
+                        android:textSize="11.5sp" />
+
+                    <TextView
+                        android:id="@+id/chipTailscale"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_chip_tag"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="异地远程自动寻址"
+                        android:textColor="@color/achat_accent_text"
+                        android:textSize="11.5sp" />
+
+                    <TextView
+                        android:id="@+id/chipOfficeLan"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_chip_tag"
+                        android:paddingStart="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="办公室局域网"
+                        android:textColor="@color/achat_accent_text"
+                        android:textSize="11.5sp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/connectStatusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:lineSpacingExtra="2dp"
+                    android:textColor="@color/achat_danger"
+                    android:textSize="12.5sp"
+                    android:visibility="gone" />
+
+                <Button
+                    android:id="@+id/btnConnectNow"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="14dp"
+                    android:background="@drawable/bg_btn_primary"
+                    android:stateListAnimator="@null"
+                    android:text="连接并进入 AChat"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15.5sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Card 3: Saved Server History (One-Tap Switch) -->
+            <LinearLayout
+                android:id="@+id/historyCardContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card_white"
+                android:orientation="vertical"
+                android:padding="16dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="常用连接地址（点击一键切换）"
+                    android:textColor="@color/achat_text_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:id="@+id/savedEndpointsList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="vertical" />
+            </LinearLayout>
+
+        </LinearLayout>
+    </ScrollView>
+
+</FrameLayout>
