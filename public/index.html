@@ -541,20 +541,38 @@
             <div class="drawer-section" id="drawerAgentProfilesSection">
               <div class="drawer-row-between">
                 <div class="drawer-label" style="margin-bottom:0">AI 员工档案（模型与岗位人设）</div>
+                <div class="drawer-inline-tools">
+                  <button
+                    id="toggleDrawerLegacyModelsBtn"
+                    class="stb-mini-btn"
+                    type="button"
+                    aria-pressed="false"
+                    title="显示或隐藏旧版/低档位模型（如 Argon / 3.8 Flash / GPT-5）"
+                  >
+                    含旧模型
+                  </button>
+                  <button
+                    id="refreshDrawerModelsBtn"
+                    class="stb-mini-btn"
+                    type="button"
+                    title="从本机 CLI 与模型缓存重新同步最新模型列表"
+                  >
+                    ↻ 刷新模型
+                  </button>
+                </div>
               </div>
               <div id="drawerAgentProfilesList" class="agent-profiles-list"></div>
               <datalist id="agentModelPresetsList">
-                <option value="gpt-6-astra" label="Codex · GPT-6-Astra 旗舰推理"></option>
                 <option value="gpt-6.1-sol" label="Codex · GPT-6.1-Sol 最新主力"></option>
+                <option value="gpt-6-astra" label="Codex · GPT-6-Astra 旗舰推理"></option>
                 <option value="gpt-6.1-terra" label="Codex · GPT-6.1-Terra 专项编码"></option>
                 <option value="gpt-6-luna" label="Codex · GPT-6-Luna 极速轻量"></option>
-                <option value="gemini-4-argon-high" label="Antigravity · Gemini 4 Argon (High)"></option>
-                <option value="gemini-4-argon-medium" label="Antigravity · Gemini 4 Argon (Medium)"></option>
-                <option value="gemini-3.8-flash-high" label="Antigravity · Gemini 3.8 Flash (High)"></option>
-                <option value="gemini-3.8-flash-low" label="Antigravity · Gemini 3.8 Flash (Low)"></option>
+                <option value="gemini-4-carbon-high" label="Antigravity · Gemini 4 Carbon (High)"></option>
+                <option value="gemini-4-carbon-medium" label="Antigravity · Gemini 4 Carbon (Medium)"></option>
+                <option value="gemini-4-hydrogen-high" label="Antigravity · Gemini 4 Hydrogen (High)"></option>
+                <option value="gemini-4-hydrogen-low" label="Antigravity · Gemini 4 Hydrogen (Low)"></option>
                 <option value="claude-opus-5-5-high" label="Antigravity / Claude · Opus 5.5 (High)"></option>
                 <option value="claude-sonnet-5-5-high" label="Antigravity / Claude · Sonnet 5.5 (High)"></option>
-                <option value="gpt-oss-120b-medium" label="Antigravity · GPT-OSS 120B"></option>
                 <option value="qwen3-coder:30b" label="Ollama · Qwen3 Coder 30B"></option>
               </datalist>
             </div>
@@ -883,6 +901,9 @@
           <button id="refreshExtSessionsBtn" class="stb-mini-btn" type="button" title="重新扫描本机最新打开的 Codex 与 Antigravity 会话">
             刷新会话
           </button>
+          <button id="refreshRoutingModelsBtn" class="stb-mini-btn" type="button" title="静默同步 Codex 与 Antigravity 最新官方模型列表">
+            ↻ 刷新模型
+          </button>
         </div>
         <div class="srd-toolbar-actions">
           <button
@@ -949,6 +970,15 @@
           title="长任务自动唤醒机制：遇到静默断连自动同会话续跑，且阶段未完自动接力推进"
         >
           自动唤醒 · 开
+        </button>
+        <button
+          id="toggleRoutingLegacyModelsBtn"
+          class="stb-mini-btn"
+          type="button"
+          aria-pressed="false"
+          title="默认已隐藏低于 Hydrogen 的旧模型；点击可临时显示全部原始模型"
+        >
+          含旧模型
         </button>
       </div>
 

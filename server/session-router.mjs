@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { executeExtraProviderTurn } from './fusion-hub.mjs';
 
@@ -231,12 +231,17 @@ export function normalizeSessionSlot(
         : `AG-${provNum}`;
   const label = String(obj.label || obj.title || defaultLabel).trim().slice(0, 32) || defaultLabel;
   const role = VALID_SLOT_ROLES.includes(obj.role) ? obj.role : 'peer';
+  const model = String(obj.model || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._:/-]/g, '')
+    .slice(0, 80);
   const target = normalizeSingleAgentTarget(obj, defaultScopePath);
   return {
     slotId,
     provider,
     label,
     role,
+    model,
     ...target,
   };
 }
@@ -326,6 +331,14 @@ export function getActiveExternalSlots(routing) {
   return routing.slots.filter(
     (s) => (s.mode === 'existing' && Boolean(s.sessionId)) || s.mode === 'new'
   );
+}
+
+export function isGroupFullyExternallyRouted(routing) {
+  if (!routing || !routing.enabled || !Array.isArray(routing.slots) || routing.slots.length === 0) {
+    return false;
+  }
+  const active = getActiveExternalSlots(routing);
+  return active.length > 0 && active.length === routing.slots.length;
 }
 
 export function resolveRoutingSlot(routing, idOrLabel = '') {
@@ -597,16 +610,25 @@ export async function ensureAntigravityCliTrajectory({
   const desktopMtime = getMaxWalMtimeMs(srcDb);
   const cliMtime = dstExists ? getMaxWalMtimeMs(dstDb) : 0;
   const cliLocked = dstExists && checkAgyPresenceLocked(cliDir, safeId);
+  const srcMeta = readDbStepCountAndWorkspaces(srcDb);
+  const dstMeta = dstExists
+    ? readDbStepCountAndWorkspaces(dstDb)
+    : { stepCount: 0, trajectoryType: null };
 
-  if (dstExists && (desktopMtime <= cliMtime + 1000 || cliLocked)) {
-    setDbTrajectoryType(dstDb, 22, 1);
+  const dstNeedsRebridge =
+    !dstExists ||
+    isCliTrajectorySentinelStub(dstMeta) ||
+    srcMeta.stepCount > dstMeta.stepCount ||
+    desktopMtime > cliMtime + 1000;
+  if (dstExists && (!dstNeedsRebridge || cliLocked)) {
+    setDbTrajectoryType(dstDb, 22, 1, safeId);
     return { bridged: false, reusedCli: true, dstDb };
   }
 
   await fsp.mkdir(dstConvDir, { recursive: true });
   const tmpDb = path.join(
-    dstConvDir,
-    `${safeId}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.db`
+    os.tmpdir(),
+    `achat-agy-bridge-${safeId}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.db`
   );
   const sqlSafeTmp = tmpDb.replace(/'/g, "''");
 
@@ -628,16 +650,72 @@ export async function ensureAntigravityCliTrajectory({
 
   // Mark CLI bridged copy as trajectory_type = 22 (0x16) so Desktop's `recomputeAndStore` (`cmp eax, 0x16; je return`)
   // ignores `antigravity-cli/conversations/<id>.db` even while `agy.exe` is actively running!
-  setDbTrajectoryType(tmpDb, 22, 1);
+  setDbTrajectoryType(tmpDb, 22, 1, safeId);
 
-  for (const stale of [dstDb, `${dstDb}-wal`, `${dstDb}-shm`]) {
-    await fsp.rm(stale, { force: true }).catch(() => {});
+  // Overwrite dstDb atomically in place via sqliteBackup (never unlink/rm dstDb inside conversations/,
+  // otherwise Windows fsnotify fires Remove and Desktop's handleFileEvent calls DeleteSummary).
+  try {
+    await syncSqliteDbInPlace(tmpDb, dstDb);
+  } finally {
+    await fsp.rm(tmpDb, { force: true }).catch(() => {});
   }
-  await fsp.rename(tmpDb, dstDb);
   return { bridged: true, dstDb };
 }
 
-function setDbTrajectoryType(dbPath, trajectoryType, source = 1) {
+const SQLITE_HEADER_BYTES = Buffer.from('SQLite format 3\0', 'utf8');
+
+function isSqliteHeaderFile(filePath) {
+  let fd = null;
+  try {
+    const st = fs.statSync(filePath);
+    if (st.size < 16) return false;
+    const buf = Buffer.alloc(16);
+    fd = fs.openSync(filePath, 'r');
+    const bytesRead = fs.readSync(fd, buf, 0, 16, 0);
+    return bytesRead === 16 && buf.equals(SQLITE_HEADER_BYTES);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+async function syncSqliteDbInPlace(srcTmpDbPath, targetDbPath) {
+  const targetWal = `${targetDbPath}-wal`;
+  if (fs.existsSync(targetWal)) {
+    await fsp.truncate(targetWal, 0).catch(() => {});
+  }
+  let canUseBackup = isSqliteHeaderFile(srcTmpDbPath);
+  if (canUseBackup && fs.existsSync(targetDbPath)) {
+    try {
+      const st = fs.statSync(targetDbPath);
+      canUseBackup = st.size === 0 || isSqliteHeaderFile(targetDbPath);
+    } catch {
+      canUseBackup = false;
+    }
+  }
+  if (canUseBackup) {
+    let srcConn = null;
+    try {
+      srcConn = new DatabaseSync(srcTmpDbPath, { readOnly: true });
+      await sqliteBackup(srcConn, targetDbPath);
+      return;
+    } catch {
+      // Fallback below if backup fails on mock/readonly target
+    } finally {
+      try {
+        srcConn?.close();
+      } catch {}
+    }
+  }
+  await fsp.copyFile(srcTmpDbPath, targetDbPath);
+}
+
+function setDbTrajectoryType(dbPath, trajectoryType, source = 1, fallbackCascadeId = '') {
   if (!dbPath || !fs.existsSync(dbPath)) return false;
   let db = null;
   try {
@@ -647,10 +725,14 @@ function setDbTrajectoryType(dbPath, trajectoryType, source = 1) {
       .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trajectory_meta' LIMIT 1")
       .get();
     if (hasMeta) {
-      db.prepare('UPDATE trajectory_meta SET trajectory_type = ?, source = ?').run(
-        Number(trajectoryType),
-        Number(source)
-      );
+      const res = db
+        .prepare('UPDATE trajectory_meta SET trajectory_type = ?, source = ?')
+        .run(Number(trajectoryType), Number(source));
+      if ((res?.changes || 0) === 0 && fallbackCascadeId) {
+        db.prepare(
+          'INSERT INTO trajectory_meta (trajectory_id, cascade_id, trajectory_type, source) VALUES (?, ?, ?, ?)'
+        ).run(String(fallbackCascadeId), String(fallbackCascadeId), Number(trajectoryType), Number(source));
+      }
       return true;
     }
   } catch {
@@ -661,6 +743,56 @@ function setDbTrajectoryType(dbPath, trajectoryType, source = 1) {
     } catch {}
   }
   return false;
+}
+
+function isCliTrajectorySentinelStub(meta) {
+  return Boolean(meta && meta.trajectoryType === 22 && Number(meta.stepCount || 0) === 0);
+}
+
+const CLI_SENTINEL_STUB_DDL = [
+  'PRAGMA user_version = 1;',
+  'CREATE TABLE `trajectory_meta` (`trajectory_id` text,`cascade_id` text,`trajectory_type` integer,`source` integer,PRIMARY KEY (`trajectory_id`));',
+  'CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`has_subtrajectory` numeric NOT NULL DEFAULT false,`metadata` blob,`error_details` blob,`permissions` blob,`task_details` blob,`render_info` blob,`step_payload` blob,`step_format` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));',
+  'CREATE INDEX `idx_steps_status` ON `steps`(`status`);',
+  'CREATE INDEX `idx_steps_step_type` ON `steps`(`step_type`);',
+  'CREATE TABLE `gen_metadata` (`idx` integer,`data` blob,`size` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));',
+  'CREATE TABLE `executor_metadata` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));',
+  'CREATE TABLE `parent_references` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));',
+  'CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT "main",`data` blob,PRIMARY KEY (`id`));',
+  'CREATE TABLE `battle_mode_infos` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));',
+].join('\n');
+
+async function writeCliTrajectorySentinelStub(dstDb, safeId, trajectoryId = '') {
+  const tmpStubDb = path.join(
+    os.tmpdir(),
+    `achat-agy-stub-${safeId}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.db`
+  );
+  let stubConn = null;
+  try {
+    stubConn = new DatabaseSync(tmpStubDb);
+    stubConn.exec(CLI_SENTINEL_STUB_DDL);
+    stubConn
+      .prepare(
+        'INSERT INTO trajectory_meta (trajectory_id, cascade_id, trajectory_type, source) VALUES (?, ?, 22, 1)'
+      )
+      .run(String(trajectoryId || safeId), String(safeId));
+  } finally {
+    try {
+      stubConn?.close();
+    } catch {}
+  }
+
+  await fsp.mkdir(path.dirname(dstDb), { recursive: true });
+  try {
+    await syncSqliteDbInPlace(tmpStubDb, dstDb);
+    const dstWal = `${dstDb}-wal`;
+    if (fs.existsSync(dstWal)) {
+      await fsp.truncate(dstWal, 0).catch(() => {});
+    }
+    await fsp.utimes(dstDb, new Date(1000), new Date(1000)).catch(() => {});
+  } finally {
+    await fsp.rm(tmpStubDb, { force: true }).catch(() => {});
+  }
 }
 
 function readProtoVarint(buf, offset) {
@@ -732,7 +864,15 @@ function parsePbtxtTitle(pbtxtPath) {
 }
 
 function readDbStepCountAndWorkspaces(dbPath) {
-  const out = { stepCount: 0, workspaceUris: [] };
+  const out = {
+    stepCount: 0,
+    workspaceUris: [],
+    trajectoryId: '',
+    trajectoryType: null,
+    metadataBlob: null,
+    projectId: '',
+    createdAtProto: null,
+  };
   if (!dbPath || !fs.existsSync(dbPath)) return out;
   let st = null;
   try {
@@ -755,14 +895,60 @@ function readDbStepCountAndWorkspaces(dbPath) {
       const r = db.prepare('SELECT count(*) AS cnt FROM steps').get();
       out.stepCount = Math.max(out.stepCount, Number(r?.cnt || 0));
     }
+    if (tables.has('trajectory_steps')) {
+      const r = db.prepare('SELECT count(*) AS cnt FROM trajectory_steps').get();
+      out.stepCount = Math.max(out.stepCount, Number(r?.cnt || 0));
+    }
     if (tables.has('trajectory')) {
       const r = db.prepare('SELECT step_count FROM trajectory LIMIT 1').get();
       out.stepCount = Math.max(out.stepCount, Number(r?.step_count || 0));
     }
+    if (tables.has('trajectory_meta')) {
+      const r = db.prepare('SELECT trajectory_id, trajectory_type FROM trajectory_meta LIMIT 1').get();
+      if (r?.trajectory_id) {
+        out.trajectoryId = String(r.trajectory_id).trim();
+      }
+      if (r && r.trajectory_type !== undefined && r.trajectory_type !== null) {
+        out.trajectoryType = Number(r.trajectory_type);
+      }
+    }
     if (tables.has('trajectory_metadata_blob')) {
       const row = db.prepare('SELECT data FROM trajectory_metadata_blob LIMIT 1').get();
       if (row?.data && row.data.length > 0) {
-        const text = Buffer.from(row.data).toString('utf8');
+        const blobBuf = Buffer.from(row.data);
+        out.metadataBlob = blobBuf;
+        let mpos = 0;
+        try {
+          while (mpos < blobBuf.length) {
+            const tagInfo = readProtoVarint(blobBuf, mpos);
+            mpos = tagInfo.next;
+            const fieldNum = Number(tagInfo.val >> 3n);
+            const wireType = Number(tagInfo.val & 7n);
+            if (wireType === 0) {
+              mpos = readProtoVarint(blobBuf, mpos).next;
+            } else if (wireType === 1) {
+              mpos += 8;
+            } else if (wireType === 5) {
+              mpos += 4;
+            } else if (wireType === 2) {
+              const lenInfo = readProtoVarint(blobBuf, mpos);
+              const valEnd = lenInfo.next + Number(lenInfo.val);
+              if (valEnd > blobBuf.length) break;
+              const slice = blobBuf.subarray(lenInfo.next, valEnd);
+              if (fieldNum === 2 && !out.createdAtProto && slice.length > 0) {
+                out.createdAtProto = Buffer.from(slice);
+              } else if (fieldNum === 18 && !out.projectId && slice.length > 0) {
+                out.projectId = slice.toString('utf8').trim();
+              }
+              mpos = valEnd;
+            } else {
+              break;
+            }
+          }
+        } catch {
+          // ignore malformed metadata tail
+        }
+        const text = blobBuf.toString('utf8');
         const matches = text.match(/file:\/\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/g) || [];
         for (const m of matches) {
           const decoded = m.replace(/%3A/gi, ':');
@@ -782,16 +968,81 @@ function readDbStepCountAndWorkspaces(dbPath) {
   return out;
 }
 
+function encodeTimestampProto(dateOrIso) {
+  let ms = Date.now();
+  if (typeof dateOrIso === 'number' && Number.isFinite(dateOrIso)) {
+    ms = dateOrIso;
+  } else if (dateOrIso) {
+    const parsed = new Date(String(dateOrIso)).getTime();
+    if (Number.isFinite(parsed) && parsed > 0) ms = parsed;
+  }
+  const sec = Math.max(1, Math.floor(ms / 1000));
+  const nanos = Math.max(0, Math.round((ms - sec * 1000) * 1_000_000));
+  const parts = [Buffer.from([0x08]), encodeProtoVarint(sec)];
+  if (nanos > 0) {
+    parts.push(Buffer.from([0x10]), encodeProtoVarint(nanos));
+  }
+  return Buffer.concat(parts);
+}
+
+function buildSyntheticTrajectoryMetadataProto({
+  sessionId = '',
+  workspaceUris = [],
+  projectId = '',
+  createdAtProto = null,
+} = {}) {
+  const parts = [];
+  for (const rawUri of Array.isArray(workspaceUris) ? workspaceUris : []) {
+    const uriStr = String(rawUri || '').trim();
+    if (!uriStr) continue;
+    const uBuf = Buffer.from(uriStr, 'utf8');
+    const wsMsg = Buffer.concat([
+      Buffer.from([0x0a]),
+      encodeProtoVarint(uBuf.length),
+      uBuf,
+      Buffer.from([0x1a, 0x00]),
+    ]);
+    parts.push(Buffer.from([0x0a]), encodeProtoVarint(wsMsg.length), wsMsg);
+  }
+  const tsBuf = createdAtProto || encodeTimestampProto(Date.now());
+  parts.push(Buffer.from([0x12]), encodeProtoVarint(tsBuf.length), tsBuf);
+  if (sessionId) {
+    const sBuf = Buffer.from(String(sessionId), 'utf8');
+    parts.push(Buffer.from([0x32]), encodeProtoVarint(sBuf.length), sBuf);
+  }
+  if (projectId) {
+    const pBuf = Buffer.from(String(projectId), 'utf8');
+    parts.push(Buffer.from([0x92, 0x01]), encodeProtoVarint(pBuf.length), pBuf);
+  }
+  return Buffer.concat(parts);
+}
+
 function buildCleanDesktopSummaryProto(
   rawBuf,
   fallbackTitle = '',
   fallbackPreview = '',
   minStepCount = 0,
-  fallbackWorkspaceUris = []
+  fallbackWorkspaceUris = [],
+  {
+    trajectoryId = '',
+    metadataBlob = null,
+    createdAtProto = null,
+    sessionId = '',
+    projectId = '',
+    lastModifiedTime = '',
+  } = {}
 ) {
   const chunks = [];
   let hasField1 = false;
+  let hasField3 = false;
+  let hasField4 = false;
+  let hasField5 = false;
+  let hasField7 = false;
   let hasField9 = false;
+  let hasField10 = false;
+  let hasField17 = false;
+  let hasField22 = false;
+  let hasField28 = false;
   let maxStepCount = Math.max(0, Number(minStepCount || 0));
   const titleStr = String(fallbackTitle || '').trim();
 
@@ -808,23 +1059,43 @@ function buildCleanDesktopSummaryProto(
         if (wireType === 0) {
           const vInfo = readProtoVarint(buf, pos);
           pos = vInfo.next;
-          // Strip field 20 (source = CORTEX_TRAJECTORY_SOURCE_CLI) and CLI-only flags 21, 26
-          if (fieldNum === 20 || fieldNum === 21 || fieldNum === 26) continue;
+          // Strip ONLY field 20 (source = CORTEX_TRAJECTORY_SOURCE_CLI); keep desktop flags 21/26 intact
+          if (fieldNum === 20) continue;
           if (fieldNum === 2) {
             maxStepCount = Math.max(maxStepCount, Number(vInfo.val));
             continue;
           }
           if (fieldNum === 5) {
+            hasField5 = true;
             chunks.push(Buffer.from([0x28, 0x01])); // CASCADE_RUN_STATUS_IDLE
             continue;
           }
+          if (fieldNum === 22) {
+            hasField22 = true;
+            chunks.push(Buffer.from([0xb0, 0x01, 0x04]));
+            continue;
+          }
+          if (fieldNum === 28) hasField28 = true;
         } else if (wireType === 1) {
           pos += 8;
         } else if (wireType === 2) {
           const lenInfo = readProtoVarint(buf, pos);
-          pos = lenInfo.next + Number(lenInfo.val);
+          const payloadLen = Number(lenInfo.val);
+          pos = lenInfo.next + payloadLen;
+          if (pos > buf.length) break;
           if (fieldNum === 1) hasField1 = true;
+          if (fieldNum === 3) hasField3 = true;
+          if (fieldNum === 4) hasField4 = true;
+          if (fieldNum === 7) hasField7 = true;
           if (fieldNum === 9) hasField9 = true;
+          if (fieldNum === 10) hasField10 = true;
+          if (fieldNum === 17) {
+            if (payloadLen > 0) {
+              hasField17 = true;
+            } else {
+              continue;
+            }
+          }
           // Always replace field 15 when we have an explicit Desktop title so an empty/timestamp-only field 15 doesn't blank the title
           if (fieldNum === 15 && titleStr) continue;
         } else if (wireType === 5) {
@@ -847,6 +1118,21 @@ function buildCleanDesktopSummaryProto(
   if (maxStepCount > 0) {
     chunks.push(Buffer.concat([Buffer.from([0x10]), encodeProtoVarint(maxStepCount)]));
   }
+  if (!hasField3) {
+    const mtimeBuf = encodeTimestampProto(lastModifiedTime || Date.now());
+    chunks.push(Buffer.concat([Buffer.from([0x1a]), encodeProtoVarint(mtimeBuf.length), mtimeBuf]));
+  }
+  if (!hasField4 && trajectoryId) {
+    const tIdBuf = Buffer.from(String(trajectoryId), 'utf8');
+    chunks.push(Buffer.concat([Buffer.from([0x22]), encodeProtoVarint(tIdBuf.length), tIdBuf]));
+  }
+  if (!hasField5) {
+    chunks.push(Buffer.from([0x28, 0x01]));
+  }
+  if (!hasField7) {
+    const ctimeBuf = createdAtProto || encodeTimestampProto(lastModifiedTime || Date.now());
+    chunks.push(Buffer.concat([Buffer.from([0x3a]), encodeProtoVarint(ctimeBuf.length), ctimeBuf]));
+  }
   if (!hasField9 && Array.isArray(fallbackWorkspaceUris) && fallbackWorkspaceUris.length > 0) {
     for (const rawUri of fallbackWorkspaceUris) {
       const uriStr = String(rawUri || '').trim();
@@ -861,18 +1147,88 @@ function buildCleanDesktopSummaryProto(
       chunks.push(Buffer.concat([Buffer.from([0x4a]), encodeProtoVarint(wsMsg.length), wsMsg]));
     }
   }
+  if (!hasField10) {
+    const uTimeBuf = encodeTimestampProto(lastModifiedTime || Date.now());
+    chunks.push(Buffer.concat([Buffer.from([0x52]), encodeProtoVarint(uTimeBuf.length), uTimeBuf]));
+  }
   if (titleStr) {
     const tBuf = Buffer.from(titleStr, 'utf8');
     const annotMsg = Buffer.concat([Buffer.from([0x0a]), encodeProtoVarint(tBuf.length), tBuf]);
     chunks.push(Buffer.concat([Buffer.from([0x7a]), encodeProtoVarint(annotMsg.length), annotMsg]));
   }
+  if (!hasField17) {
+    const metaPayload =
+      metadataBlob && metadataBlob.length > 0
+        ? Buffer.from(metadataBlob)
+        : buildSyntheticTrajectoryMetadataProto({
+            sessionId,
+            workspaceUris: fallbackWorkspaceUris,
+            projectId,
+            createdAtProto,
+          });
+    if (metaPayload.length > 0) {
+      chunks.push(
+        Buffer.concat([Buffer.from([0x8a, 0x01]), encodeProtoVarint(metaPayload.length), metaPayload])
+      );
+    }
+  }
+  if (!hasField22) {
+    chunks.push(Buffer.from([0xb0, 0x01, 0x04]));
+  }
+  if (!hasField28) {
+    chunks.push(Buffer.from([0xe0, 0x01, 0x04]));
+  }
   return Buffer.concat(chunks);
+}
+
+function listLiveDesktopHubs(antigravityDataDir, maxCount = 6) {
+  if (!antigravityDataDir) return [];
+  const daemonDir = path.join(antigravityDataDir, 'daemon');
+  if (!fs.existsSync(daemonDir)) return [];
+
+  let hubFiles = [];
+  try {
+    hubFiles = fs
+      .readdirSync(daemonDir)
+      .filter((f) => /^hub_.*\.json$/i.test(f))
+      .map((name) => {
+        const fullPath = path.join(daemonDir, name);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(fullPath).mtimeMs || 0;
+        } catch {}
+        return { name, fullPath, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  } catch {
+    return [];
+  }
+
+  const liveHubs = [];
+  for (const item of hubFiles) {
+    try {
+      const hub = JSON.parse(fs.readFileSync(item.fullPath, 'utf8'));
+      if (!hub?.httpPort || !hub?.csrfToken) continue;
+      if (hub.pid) {
+        try {
+          process.kill(Number(hub.pid), 0);
+        } catch {
+          continue;
+        }
+      }
+      liveHubs.push(hub);
+      if (liveHubs.length >= maxCount) break;
+    } catch {
+      // ignore unreachable/corrupt hub file
+    }
+  }
+  return liveHubs;
 }
 
 async function notifyDesktopJetboxWriteSummary(antigravityDataDir, sessionId, cleanProto) {
   if (!antigravityDataDir || !sessionId || !cleanProto || cleanProto.length === 0) return false;
-  const daemonDir = path.join(antigravityDataDir, 'daemon');
-  if (!fs.existsSync(daemonDir)) return false;
+  const liveHubs = listLiveDesktopHubs(antigravityDataDir, 6);
+  if (liveHubs.length === 0) return false;
 
   const idBuf = Buffer.from(sessionId, 'utf8');
   const reqProto = Buffer.concat([
@@ -884,25 +1240,8 @@ async function notifyDesktopJetboxWriteSummary(antigravityDataDir, sessionId, cl
     cleanProto,
   ]);
 
-  let entries = [];
-  try {
-    entries = fs.readdirSync(daemonDir).filter((f) => /^hub_.*\.json$/i.test(f));
-  } catch {
-    return false;
-  }
-
-  let notified = false;
-  for (const name of entries) {
-    try {
-      const hub = JSON.parse(fs.readFileSync(path.join(daemonDir, name), 'utf8'));
-      if (!hub?.httpPort || !hub?.csrfToken) continue;
-      if (hub.pid) {
-        try {
-          process.kill(Number(hub.pid), 0);
-        } catch {
-          continue;
-        }
-      }
+  const results = await Promise.allSettled(
+    liveHubs.map(async (hub) => {
       const resp = await fetch(
         `http://127.0.0.1:${hub.httpPort}/exa.language_server_pb.LanguageServerService/JetboxWriteSummary`,
         {
@@ -912,15 +1251,13 @@ async function notifyDesktopJetboxWriteSummary(antigravityDataDir, sessionId, cl
             'x-codeium-csrf-token': hub.csrfToken,
           },
           body: reqProto,
-          signal: AbortSignal.timeout(1500),
+          signal: AbortSignal.timeout(700),
         }
       );
-      if (resp.ok) notified = true;
-    } catch {
-      // ignore unreachable hub file
-    }
-  }
-  return notified;
+      return Boolean(resp.ok);
+    })
+  );
+  return results.some((r) => r.status === 'fulfilled' && r.value === true);
 }
 
 /**
@@ -986,13 +1323,15 @@ export async function restoreAntigravityDesktopTrajectory({
     dstSize > 0 &&
     !deskLocked &&
     !keepCliDb &&
-    (dstMeta.stepCount >= srcMeta.stepCount || (srcMeta.stepCount === 0 && dstSize >= srcSize));
+    !isCliTrajectorySentinelStub(dstMeta) &&
+    ((dstMeta.stepCount > 0 && dstMeta.stepCount >= srcMeta.stepCount) ||
+      (srcMeta.stepCount === 0 && dstMeta.stepCount === 0 && dstMeta.trajectoryType !== 0 && dstSize > srcSize));
   if (canSyncBack) {
     const deskConvDir = path.join(antigravityDataDir, 'conversations');
     await fsp.mkdir(deskConvDir, { recursive: true });
     const tmpSyncDb = path.join(
-      deskConvDir,
-      `${safeId}.sync-tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.db`
+      os.tmpdir(),
+      `achat-agy-sync-${safeId}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.db`
     );
     const sqlSafeTmp = tmpSyncDb.replace(/'/g, "''");
     let cliConn = null;
@@ -1002,19 +1341,17 @@ export async function restoreAntigravityDesktopTrajectory({
       cliConn.close();
       cliConn = null;
       setDbTrajectoryType(tmpSyncDb, 4, 1);
-      for (const stale of [`${srcDb}-wal`, `${srcDb}-shm`]) {
-        await fsp.rm(stale, { force: true }).catch(() => {});
-      }
-      await fsp.rename(tmpSyncDb, srcDb);
+      await syncSqliteDbInPlace(tmpSyncDb, srcDb);
       syncedBack = true;
     } catch {
-      await fsp.rm(tmpSyncDb, { force: true }).catch(() => {});
+      // non-fatal sync error
     } finally {
       try {
         cliConn?.close();
       } catch {
         // ignore
       }
+      await fsp.rm(tmpSyncDb, { force: true }).catch(() => {});
     }
 
     // Also sync transcript.jsonl back to Desktop brain directory if CLI transcript is newer/larger
@@ -1041,30 +1378,22 @@ export async function restoreAntigravityDesktopTrajectory({
     }
   }
 
-  // Ensure any non-empty CLI `.db` has trajectory_type = 22 (0x16) so Desktop's `recomputeAndStore` (`cmp eax, 0x16; je return`)
-  // ignores it even while `agy.exe` is actively running!
-  if (dstSize > 0 && fs.existsSync(dstDb)) {
-    setDbTrajectoryType(dstDb, 22, 1);
-  }
-
-  // CRITICAL: Truncate CLI `.db` to 0 bytes (DO NOT unlink!) when turn is idle, and reset mtime to epoch
-  // so even older in-memory routers see `srcStat.mtimeMs > dstStat.mtimeMs` and re-bridge before spawning `agy.exe`.
-  // In Antigravity Desktop's `jetbox_summaries_store`:
-  // - Unlinking `<id>.db` triggers `handleFileEvent` -> `DeleteSummary(<id>)` (`s.deleted[id] = true`), wiping it from Desktop!
-  // - Leaving `<id>.db` with `size > 0` triggers `scanAndRefresh` -> `recomputeAndStore(defaultSource=CLI)`, wiping `title` and setting `source=CORTEX_TRAJECTORY_SOURCE_CLI`!
-  // - Truncating `<id>.db` to 0 bytes keeps `os.Stat` succeeding while `loadTrajectoryFile` sees `Size() == 0` and returns `(nil, modTime, nil)` (no-op)!
+  // Replace idle CLI DB with a valid user_version=1, trajectory_type=22 (0x16), 0-step SQLite sentinel stub
+  // so language_server.exe never auto-migrates a 0-byte file into trajectory_type=0, steps=0 and overwrites Desktop metadata.
   let truncatedCliStub = false;
-  if (!keepCliDb && !cliLocked && fs.existsSync(dstDb) && dstSize > 0) {
-    try {
-      await fsp.truncate(dstDb, 0);
-      await fsp.utimes(dstDb, new Date(1000), new Date(1000)).catch(() => {});
-      for (const stale of [`${dstDb}-wal`, `${dstDb}-shm`]) {
-        await fsp.rm(stale, { force: true }).catch(() => {});
+  if (!keepCliDb && !cliLocked && fs.existsSync(dstDb)) {
+    if (!isCliTrajectorySentinelStub(dstMeta) || dstSize === 0) {
+      try {
+        await writeCliTrajectorySentinelStub(
+          dstDb,
+          safeId,
+          srcMeta.trajectoryId || dstMeta.trajectoryId || safeId
+        );
+        truncatedCliStub = true;
+        await new Promise((r) => setTimeout(r, 150));
+      } catch {
+        // ignore if locked
       }
-      truncatedCliStub = true;
-      await new Promise((r) => setTimeout(r, 150));
-    } catch {
-      // ignore if locked
     }
   }
 
@@ -1131,7 +1460,9 @@ export async function restoreAntigravityDesktopTrajectory({
   } catch {
     parsedWorkspaces = srcMeta.workspaceUris;
   }
-  const projectId = String(cliRow?.project_id || deskRow?.project_id || '');
+  const projectId = String(
+    cliRow?.project_id || deskRow?.project_id || srcMeta.projectId || dstMeta.projectId || ''
+  );
   const agentName = String(cliRow?.agent_name || deskRow?.agent_name || '');
   const parentConvId = String(cliRow?.parent_conversation_id || deskRow?.parent_conversation_id || '');
   const nestingDepth = Number(cliRow?.nesting_depth ?? deskRow?.nesting_depth ?? 0);
@@ -1152,7 +1483,15 @@ export async function restoreAntigravityDesktopTrajectory({
     cleanTitle,
     cleanPreview,
     stepCount,
-    parsedWorkspaces
+    parsedWorkspaces,
+    {
+      trajectoryId: srcMeta.trajectoryId || dstMeta.trajectoryId || '',
+      metadataBlob: srcMeta.metadataBlob || dstMeta.metadataBlob || null,
+      createdAtProto: srcMeta.createdAtProto || dstMeta.createdAtProto || null,
+      sessionId: safeId,
+      projectId,
+      lastModifiedTime,
+    }
   );
 
   let updatedSqlite = false;
@@ -1213,7 +1552,81 @@ export async function restoreAntigravityDesktopTrajectory({
   };
 }
 
-async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigravityCliDataDir }) {
+function walkProtoLengthFields(buf, onField) {
+  if (!buf || buf.length === 0) return;
+  let pos = 0;
+  while (pos < buf.length) {
+    const t = readProtoVarint(buf, pos);
+    pos = t.next;
+    const fn = Number(t.val >> 3n);
+    const wt = Number(t.val & 7n);
+    if (wt === 2) {
+      const l = readProtoVarint(buf, pos);
+      const len = Number(l.val);
+      const end = l.next + len;
+      if (end > buf.length) break;
+      onField(fn, buf.subarray(l.next, end));
+      pos = end;
+    } else if (wt === 0) {
+      pos = readProtoVarint(buf, pos).next;
+    } else if (wt === 1) {
+      pos += 8;
+    } else if (wt === 5) {
+      pos += 4;
+    } else {
+      break;
+    }
+  }
+}
+
+function inspectCascadeSummaryProtoFlags(summaryBuf) {
+  let hasTitle = false;
+  let hasProjectId = false;
+  if (!summaryBuf || summaryBuf.length === 0) return { hasTitle, hasProjectId };
+  try {
+    walkProtoLengthFields(summaryBuf, (fn, sub) => {
+      if (fn === 15 && sub.length > 0) {
+        walkProtoLengthFields(sub, (fn2, sub2) => {
+          if (fn2 === 1 && sub2.length > 0) hasTitle = true;
+        });
+      } else if (fn === 18 && sub.length > 0) {
+        hasProjectId = true;
+      } else if (fn === 17 && sub.length > 0) {
+        walkProtoLengthFields(sub, (fn2, sub2) => {
+          if (fn2 === 6 && sub2.length > 0) hasProjectId = true;
+        });
+      }
+    });
+  } catch {
+    // ignore malformed proto tail
+  }
+  return { hasTitle, hasProjectId };
+}
+
+function readAgyhubSummaryMap(pbPath) {
+  if (!pbPath || !fs.existsSync(pbPath)) return null;
+  try {
+    const buf = fs.readFileSync(pbPath);
+    const entries = new Map();
+    walkProtoLengthFields(buf, (fn, sub) => {
+      if (fn !== 1 || sub.length < 3) return;
+      let id = '';
+      let summaryBuf = null;
+      walkProtoLengthFields(sub, (sfn, ssub) => {
+        if (sfn === 1) id = ssub.toString('utf8');
+        else if (sfn === 2) summaryBuf = ssub;
+      });
+      if (id) {
+        entries.set(id, inspectCascadeSummaryProtoFlags(summaryBuf));
+      }
+    });
+    return entries;
+  } catch {
+    return null;
+  }
+}
+
+export async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigravityCliDataDir }) {
   if (!antigravityDataDir || !fs.existsSync(antigravityDataDir)) return;
   const cliDir = resolveCliDataDir(antigravityDataDir, antigravityCliDataDir);
   if (!cliDir || path.resolve(cliDir) === path.resolve(antigravityDataDir)) return;
@@ -1229,14 +1642,15 @@ async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigr
         const id = f.slice(0, -3);
         const full = path.join(cliConvDir, f);
         const sz = fs.statSync(full).size;
-        if (sz > 0) {
+        const cliMeta = sz > 0 ? readDbStepCountAndWorkspaces(full) : null;
+        if (sz === 0 || !isCliTrajectorySentinelStub(cliMeta)) {
           const hasDesk =
             fs.existsSync(path.join(antigravityDataDir, 'conversations', `${id}.db`)) ||
             fs.existsSync(path.join(antigravityDataDir, 'annotations', `${id}.pbtxt`));
           if (hasDesk) {
             const locked = checkAgyPresenceLocked(cliDir, id);
-            setDbTrajectoryType(full, 22, 1);
             if (!locked) {
+              if (sz > 0) setDbTrajectoryType(full, 22, 1, id);
               toHeal.set(id, false);
             }
           }
@@ -1247,7 +1661,8 @@ async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigr
     }
   }
 
-  // 2. Check any Desktop summary rows marked with `source = 'CORTEX_TRAJECTORY_SOURCE_CLI'` that have a Desktop `.db` or annotation
+  // 2. Detect CLI-tainted, truncated raw_summary (<120B), missing, or untitled/project-less agyhub_summaries_proto.pb entries
+  const agyhubMap = readAgyhubSummaryMap(path.join(antigravityDataDir, 'agyhub_summaries_proto.pb'));
   const deskSummariesPath = path.join(antigravityDataDir, 'conversation_summaries.db');
   if (fs.existsSync(deskSummariesPath)) {
     let db = null;
@@ -1255,8 +1670,9 @@ async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigr
       db = new DatabaseSync(deskSummariesPath, { readOnly: true });
       const rows = db
         .prepare(
-          `SELECT conversation_id FROM conversation_summaries
-           WHERE source = 'CORTEX_TRAJECTORY_SOURCE_CLI'`
+          `SELECT conversation_id, title, source, project_id, length(raw_summary) AS plen
+           FROM conversation_summaries
+           WHERE nesting_depth = 0 AND parent_conversation_id = '' AND killed = 0`
         )
         .all();
       for (const r of rows) {
@@ -1265,13 +1681,21 @@ async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigr
         const hasDesk =
           fs.existsSync(path.join(antigravityDataDir, 'conversations', `${id}.db`)) ||
           fs.existsSync(path.join(antigravityDataDir, 'annotations', `${id}.pbtxt`));
-        if (hasDesk) {
+        if (!hasDesk) continue;
+        const plen = Number(r.plen || 0);
+        const isCliTainted = r.source === 'CORTEX_TRAJECTORY_SOURCE_CLI';
+        const isTruncated = plen > 0 && plen < 120;
+        const hubInfo = agyhubMap ? agyhubMap.get(id) : undefined;
+        const missingFromHub = Boolean(agyhubMap && agyhubMap.size > 0 && !hubInfo);
+        const missingHubTitle = Boolean(hubInfo && String(r.title || '').trim() && !hubInfo.hasTitle);
+        const missingHubProject = Boolean(hubInfo && String(r.project_id || '').trim() && !hubInfo.hasProjectId);
+        if (isCliTainted || isTruncated || missingFromHub || missingHubTitle || missingHubProject) {
           const locked = checkAgyPresenceLocked(cliDir, id);
           toHeal.set(id, locked);
         }
       }
     } catch {
-      // ignore if `source` column is absent in lightweight test fixtures
+      // ignore if optional columns differ in lightweight test fixtures
     } finally {
       try {
         db?.close();
@@ -1287,6 +1711,79 @@ async function healHiddenAntigravityDesktopSessions({ antigravityDataDir, antigr
       keepCliDb,
     }).catch(() => {});
   }
+}
+
+/**
+ * Watches `antigravity/daemon/hub_*.json` so whenever Antigravity Desktop restarts
+ * (creating a new live hub pid/port with a clean in-memory summary store), hidden or
+ * untitled Desktop sessions are automatically restored via `JetboxWriteSummary`.
+ */
+export function startAntigravityDesktopHubHealWatcher({
+  antigravityDataDir = path.join(os.homedir(), '.gemini', 'antigravity'),
+  antigravityCliDataDir = null,
+  intervalMs = 4000,
+} = {}) {
+  const cliDir = resolveCliDataDir(antigravityDataDir, antigravityCliDataDir);
+  const seenHubKeys = new Set();
+  const followupTimers = new Set();
+  let stopped = false;
+  let scanning = false;
+
+  const runHealOnce = async () => {
+    if (stopped) return;
+    await healHiddenAntigravityDesktopSessions({
+      antigravityDataDir,
+      antigravityCliDataDir: cliDir,
+    }).catch(() => {});
+  };
+
+  const scanHubs = async () => {
+    if (stopped || scanning) return;
+    scanning = true;
+    try {
+      const liveHubs = listLiveDesktopHubs(antigravityDataDir, 6);
+      let sawNewHub = false;
+      for (const hub of liveHubs) {
+        const key = `${hub.pid || ''}:${hub.httpPort}`;
+        if (!seenHubKeys.has(key)) {
+          seenHubKeys.add(key);
+          sawNewHub = true;
+        }
+      }
+      if (sawNewHub && !stopped) {
+        await runHealOnce();
+        if (!stopped) {
+          const t = setTimeout(() => {
+            followupTimers.delete(t);
+            runHealOnce().catch(() => {});
+          }, 2000);
+          t.unref?.();
+          followupTimers.add(t);
+        }
+      }
+    } catch {
+      // ignore poll errors
+    } finally {
+      scanning = false;
+    }
+  };
+
+  const pollTimer = setInterval(() => {
+    scanHubs().catch(() => {});
+  }, Math.max(200, Number(intervalMs) || 4000));
+  pollTimer.unref?.();
+  scanHubs().catch(() => {});
+
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(pollTimer);
+      for (const t of followupTimers) {
+        clearTimeout(t);
+      }
+      followupTimers.clear();
+    },
+  };
 }
 
 async function collectAntigravitySessionsFromStore(dataDir, sourceSurface, maxItems) {
@@ -1921,6 +2418,25 @@ function appendUniqueThoughtItem(traceList, item) {
   return true;
 }
 
+/**
+ * Determine whether `agy` CLI should receive an explicit `--effort` flag for the given model ID.
+ * Orchestrator models and explicit tier-suffixed models (e.g. `-low`, `-medium`, `-high`, `-xhigh`)
+ * reject or conflict with `--effort` in `agy.exe`.
+ */
+export function shouldPassAgyEffortFlag(modelId = '') {
+  const m = String(modelId || '').trim().toLowerCase();
+  if (!m) return true;
+  if (m.includes('orchestrator')) return false;
+  if (/-(low|medium|high|xhigh|max|ultra|minimal|none)$/.test(m)) return false;
+  return true;
+}
+
+function isAgyEffortConflictError(raw = '') {
+  return /invalid model selection[\s\S]*--effort|--effort is not supported|conflicts with --effort|unknown flag: --effort/i.test(
+    String(raw || '')
+  );
+}
+
 export async function executeExternalAgentTurn({
   agent,
   mode = 'existing',
@@ -2335,29 +2851,18 @@ export async function executeExternalAgentTurn({
         antigravityDataDir,
         antigravityCliDataDir: cliDir,
       });
+      await restoreAntigravityDesktopTrajectory({
+        sessionId,
+        antigravityDataDir,
+        antigravityCliDataDir: cliDir,
+        keepCliDb: true,
+      }).catch(() => {});
     } catch {
       // non-fatal: let agy report detailed error if trajectory cannot be prepared
     }
   }
 
-  const agyArgs = Array.isArray(agyExtraLeadArgs) ? [...agyExtraLeadArgs] : [];
-  if (mode === 'existing' && sessionId) {
-    agyArgs.push('--conversation', sessionId);
-  }
-  if (workingDir && fs.existsSync(workingDir)) {
-    agyArgs.push('--add-dir', workingDir);
-  }
-  if (safeModel) {
-    agyArgs.push('--model', safeModel);
-  }
-  agyArgs.push('--output-format', 'stream-json', '--effort', effort);
-
-  if (permission === 'read-only') {
-    agyArgs.push('--mode', 'plan', '--sandbox', '--dangerously-skip-permissions');
-  } else {
-    agyArgs.push('--dangerously-skip-permissions', '--disable-slash-commands');
-  }
-
+  const effectiveAgyModel = safeModel || (gear === 'fast' ? 'gemini-4-hydrogen-low' : '');
   const attachmentHint =
     attachments.length > 0
       ? `\n\n【附加文件路径】：\n${attachments.map((a) => `- ${a.filePath}`).join('\n')}`
@@ -2366,405 +2871,456 @@ export async function executeExternalAgentTurn({
     permission === 'read-only'
       ? '【权限硬边界：本次任务为「只读分析」模式，严禁创建、修改或删除任何代码与本地文件，仅做读取与方案分析。】\n\n'
       : '';
-  agyArgs.push('-p', `${readOnlyGuard}${prompt}${attachmentHint}`);
 
-  return new Promise((resolve) => {
-    const child = spawn(agyBin, agyArgs, {
-      cwd: workingDir,
-      env: buildExtendedChildEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
-    registerChild?.(child);
-
-    let stdout = '';
-    let lineBuf = '';
-    let stderr = '';
-    let settled = false;
-    let detectedConvId = sessionId || '';
-    let streamedResponse = '';
-    let finalResultResponse = '';
-    let resultErrorMsg = '';
-    let sawCurrentUserInput = !(mode === 'existing' && sessionId);
-    const allThoughtTrace = [];
-    let segmentThoughtTrace = [];
-    const emittedIntermediateTexts = new Set();
-
-    const recordAgyThought = (kind, text) => {
-      const changed = appendUniqueThoughtItem(allThoughtTrace, { kind, text });
-      appendUniqueThoughtItem(segmentThoughtTrace, { kind, text });
-      return changed;
-    };
-
-    const cliDirForWatch = resolveCliDataDir(antigravityDataDir, antigravityCliDataDir);
-    const transcriptOffsets = new Map();
-    const resolveTranscriptPaths = (convId) => {
-      if (!convId) return [];
-      const list = [];
-      for (const dir of [antigravityDataDir, cliDirForWatch]) {
-        if (!dir) continue;
-        const p = path.join(dir, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
-        if (!list.includes(p)) list.push(p);
-      }
-      return list;
-    };
-
-    // Record initial byte offsets so we only harvest steps from the current turn
-    if (detectedConvId) {
-      for (const tp of resolveTranscriptPaths(detectedConvId)) {
-        try {
-          if (fs.existsSync(tp)) {
-            transcriptOffsets.set(tp, fs.statSync(tp).size);
-          }
-        } catch {}
-      }
+  const buildAgyArgs = ({ includeEffort }) => {
+    const agyArgs = Array.isArray(agyExtraLeadArgs) ? [...agyExtraLeadArgs] : [];
+    if (mode === 'existing' && sessionId) {
+      agyArgs.push('--conversation', sessionId);
+    }
+    if (workingDir && fs.existsSync(workingDir)) {
+      agyArgs.push('--add-dir', workingDir);
+    }
+    if (effectiveAgyModel) {
+      agyArgs.push('--model', effectiveAgyModel);
+    }
+    agyArgs.push('--output-format', 'stream-json');
+    if (includeEffort) {
+      agyArgs.push('--effort', effort);
     }
 
-    const syncAgyTranscriptDelta = () => {
-      if (!detectedConvId) return;
-      let anyAdded = false;
-      let latestLabel = '';
-      for (const tp of resolveTranscriptPaths(detectedConvId)) {
-        try {
-          if (!fs.existsSync(tp)) continue;
-          const st = fs.statSync(tp);
-          const prevOffset = transcriptOffsets.get(tp) ?? 0;
-          if (st.size <= prevOffset) continue;
-          const readLen = Math.min(st.size - prevOffset, 512 * 1024);
-          const fd = fs.openSync(tp, 'r');
-          const buf = Buffer.alloc(readLen);
+    if (permission === 'read-only') {
+      agyArgs.push('--mode', 'plan', '--sandbox', '--dangerously-skip-permissions');
+    } else {
+      agyArgs.push('--dangerously-skip-permissions', '--disable-slash-commands');
+    }
+
+    agyArgs.push('-p', `${readOnlyGuard}${prompt}${attachmentHint}`);
+    return agyArgs;
+  };
+
+  const runSingleAgyProcess = ({ includeEffort, allowEffortRetry }) =>
+    new Promise((resolve) => {
+      const agyArgs = buildAgyArgs({ includeEffort });
+      const child = spawn(agyBin, agyArgs, {
+        cwd: workingDir,
+        env: buildExtendedChildEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      registerChild?.(child);
+
+      let stdout = '';
+      let lineBuf = '';
+      let stderr = '';
+      let settled = false;
+      let detectedConvId = sessionId || '';
+      let streamedResponse = '';
+      let finalResultResponse = '';
+      let resultErrorMsg = '';
+      let sawCurrentUserInput = !(mode === 'existing' && sessionId);
+      const allThoughtTrace = [];
+      let segmentThoughtTrace = [];
+      const emittedIntermediateTexts = new Set();
+
+      const recordAgyThought = (kind, text) => {
+        const changed = appendUniqueThoughtItem(allThoughtTrace, { kind, text });
+        appendUniqueThoughtItem(segmentThoughtTrace, { kind, text });
+        return changed;
+      };
+
+      const cliDirForWatch = resolveCliDataDir(antigravityDataDir, antigravityCliDataDir);
+      const transcriptOffsets = new Map();
+      const resolveTranscriptPaths = (convId) => {
+        if (!convId) return [];
+        const list = [];
+        for (const dir of [antigravityDataDir, cliDirForWatch]) {
+          if (!dir) continue;
+          const p = path.join(dir, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+          if (!list.includes(p)) list.push(p);
+        }
+        return list;
+      };
+
+      // Record initial byte offsets so we only harvest steps from the current turn
+      if (detectedConvId) {
+        for (const tp of resolveTranscriptPaths(detectedConvId)) {
           try {
-            fs.readSync(fd, buf, 0, readLen, st.size - readLen);
-          } finally {
-            fs.closeSync(fd);
-          }
-          transcriptOffsets.set(tp, st.size);
-          const chunkStr = buf.toString('utf8');
-          const lines = chunkStr.split(/\r?\n/).filter(Boolean);
-          for (const line of lines) {
-            if (!line.trim().startsWith('{')) continue;
-            let stepObj = null;
-            try {
-              stepObj = JSON.parse(line);
-            } catch {
-              continue;
+            if (fs.existsSync(tp)) {
+              transcriptOffsets.set(tp, fs.statSync(tp).size);
             }
-            if (stepObj.type === 'USER_INPUT' && stepObj.source === 'USER_EXPLICIT') {
-              sawCurrentUserInput = true;
-              continue;
-            }
-            if (stepObj.type === 'PLANNER_RESPONSE') {
-              if (typeof stepObj.thinking === 'string' && stepObj.thinking.trim()) {
-                const cleanThink = stepObj.thinking.trim();
-                if (recordAgyThought('thinking', cleanThink)) {
-                  anyAdded = true;
-                  const shortThink = cleanThink
-                    .replace(/\s+/g, ' ')
-                    .slice(0, 56);
-                  latestLabel = `💭 ${shortThink}`;
-                }
-              }
-              const toolCalls = Array.isArray(stepObj.tool_calls) ? stepObj.tool_calls : [];
-              for (const tc of toolCalls) {
-                const summary = formatAgyToolCallSummary(tc);
-                if (summary && recordAgyThought('tool', summary)) {
-                  anyAdded = true;
-                  latestLabel = summary;
-                }
-              }
-              const contentText = typeof stepObj.content === 'string' ? stepObj.content.trim() : '';
-              if (contentText && toolCalls.length > 0 && !emittedIntermediateTexts.has(contentText)) {
-                emittedIntermediateTexts.add(contentText);
-                const traceSnapshot = [...segmentThoughtTrace];
-                segmentThoughtTrace = [];
-                emitIntermediateSafe({
-                  sessionId: detectedConvId,
-                  text: contentText,
-                  thoughtTrace: traceSnapshot,
-                });
-              }
-            }
-          }
-        } catch {
-          // ignore transient read error
+          } catch {}
         }
       }
-      if (anyAdded) {
-        emitProgressSafe({
-          sessionId: detectedConvId,
-          stepLabel: latestLabel || '💭 正在思考与执行工具…',
-          text: sawCurrentUserInput ? streamedResponse.trim() : '',
-          thoughtTrace: [...allThoughtTrace],
-        });
-      }
-    };
 
-    const transcriptPollTimer = setInterval(syncAgyTranscriptDelta, 60);
-    transcriptPollTimer.unref?.();
-
-    const parseAgyStreamLine = (rawLine) => {
-      const trimmed = rawLine.trim();
-      if (!trimmed.startsWith('{')) return;
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed.event === 'init') {
-          if (parsed.conversation_id) {
-            const newId = String(parsed.conversation_id).trim();
-            if (newId && newId !== detectedConvId) {
-              detectedConvId = newId;
-              for (const tp of resolveTranscriptPaths(detectedConvId)) {
-                if (!transcriptOffsets.has(tp)) {
-                  try {
-                    transcriptOffsets.set(tp, fs.existsSync(tp) ? fs.statSync(tp).size : 0);
-                  } catch {}
+      const syncAgyTranscriptDelta = () => {
+        if (!detectedConvId) return;
+        let anyAdded = false;
+        let latestLabel = '';
+        for (const tp of resolveTranscriptPaths(detectedConvId)) {
+          try {
+            if (!fs.existsSync(tp)) continue;
+            const st = fs.statSync(tp);
+            const prevOffset = transcriptOffsets.get(tp) ?? 0;
+            if (st.size <= prevOffset) continue;
+            const readLen = Math.min(st.size - prevOffset, 512 * 1024);
+            const fd = fs.openSync(tp, 'r');
+            const buf = Buffer.alloc(readLen);
+            try {
+              fs.readSync(fd, buf, 0, readLen, st.size - readLen);
+            } finally {
+              fs.closeSync(fd);
+            }
+            transcriptOffsets.set(tp, st.size);
+            const chunkStr = buf.toString('utf8');
+            const lines = chunkStr.split(/\r?\n/).filter(Boolean);
+            for (const line of lines) {
+              if (!line.trim().startsWith('{')) continue;
+              let stepObj = null;
+              try {
+                stepObj = JSON.parse(line);
+              } catch {
+                continue;
+              }
+              if (stepObj.type === 'USER_INPUT' && stepObj.source === 'USER_EXPLICIT') {
+                sawCurrentUserInput = true;
+                continue;
+              }
+              if (stepObj.type === 'PLANNER_RESPONSE') {
+                if (typeof stepObj.thinking === 'string' && stepObj.thinking.trim()) {
+                  const cleanThink = stepObj.thinking.trim();
+                  if (recordAgyThought('thinking', cleanThink)) {
+                    anyAdded = true;
+                    const shortThink = cleanThink
+                      .replace(/\s+/g, ' ')
+                      .slice(0, 56);
+                    latestLabel = `💭 ${shortThink}`;
+                  }
+                }
+                const toolCalls = Array.isArray(stepObj.tool_calls) ? stepObj.tool_calls : [];
+                for (const tc of toolCalls) {
+                  const summary = formatAgyToolCallSummary(tc);
+                  if (summary && recordAgyThought('tool', summary)) {
+                    anyAdded = true;
+                    latestLabel = summary;
+                  }
+                }
+                const contentText = typeof stepObj.content === 'string' ? stepObj.content.trim() : '';
+                if (contentText && toolCalls.length > 0 && !emittedIntermediateTexts.has(contentText)) {
+                  emittedIntermediateTexts.add(contentText);
+                  const traceSnapshot = [...segmentThoughtTrace];
+                  segmentThoughtTrace = [];
+                  emitIntermediateSafe({
+                    sessionId: detectedConvId,
+                    text: contentText,
+                    thoughtTrace: traceSnapshot,
+                  });
                 }
               }
             }
+          } catch {
+            // ignore transient read error
           }
+        }
+        if (anyAdded) {
           emitProgressSafe({
             sessionId: detectedConvId,
-            stepLabel: '已连接 Antigravity 会话，正在分析代码与上下文…',
-            text: sawCurrentUserInput ? streamedResponse : '',
+            stepLabel: latestLabel || '💭 正在思考与执行工具…',
+            text: sawCurrentUserInput ? streamedResponse.trim() : '',
             thoughtTrace: [...allThoughtTrace],
           });
-          return;
         }
-        if (parsed.event === 'step_update' && parsed.step_update) {
-          const su = parsed.step_update;
-          if (su.conversation_id) detectedConvId = String(su.conversation_id).trim();
-          const stType = String(su.step_type || '').toLowerCase();
-          if (stType === 'user_input') {
-            sawCurrentUserInput = true;
-            streamedResponse = '';
-            syncAgyTranscriptDelta();
+      };
+
+      const transcriptPollTimer = setInterval(syncAgyTranscriptDelta, 60);
+      transcriptPollTimer.unref?.();
+
+      const parseAgyStreamLine = (rawLine) => {
+        const trimmed = rawLine.trim();
+        if (!trimmed.startsWith('{')) return;
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (parsed.event === 'init') {
+            if (parsed.conversation_id) {
+              const newId = String(parsed.conversation_id).trim();
+              if (newId && newId !== detectedConvId) {
+                detectedConvId = newId;
+                for (const tp of resolveTranscriptPaths(detectedConvId)) {
+                  if (!transcriptOffsets.has(tp)) {
+                    try {
+                      transcriptOffsets.set(tp, fs.existsSync(tp) ? fs.statSync(tp).size : 0);
+                    } catch {}
+                  }
+                }
+              }
+            }
             emitProgressSafe({
               sessionId: detectedConvId,
-              stepLabel: '💭 已注入新指令，正在思考…',
-              text: '',
+              stepLabel: '已连接 Antigravity 会话，正在分析代码与上下文…',
+              text: sawCurrentUserInput ? streamedResponse : '',
               thoughtTrace: [...allThoughtTrace],
             });
             return;
           }
-          if (typeof su.thinking === 'string' && su.thinking.trim()) {
-            recordAgyThought('thinking', su.thinking.trim());
-          }
-          if (typeof su.thinking_delta === 'string' && su.thinking_delta.trim()) {
-            recordAgyThought('thinking', su.thinking_delta.trim());
-          }
-          syncAgyTranscriptDelta();
-          if (typeof su.text_delta === 'string' && su.text_delta) {
-            streamedResponse += su.text_delta;
-            if (sawCurrentUserInput) {
+          if (parsed.event === 'step_update' && parsed.step_update) {
+            const su = parsed.step_update;
+            if (su.conversation_id) detectedConvId = String(su.conversation_id).trim();
+            const stType = String(su.step_type || '').toLowerCase();
+            if (stType === 'user_input') {
+              sawCurrentUserInput = true;
+              streamedResponse = '';
+              syncAgyTranscriptDelta();
               emitProgressSafe({
                 sessionId: detectedConvId,
-                stepLabel: '✍ 正在生成回复…',
-                text: streamedResponse.trim(),
-                thoughtTrace: [...allThoughtTrace],
-              });
-            } else {
-              emitProgressSafe({
-                sessionId: detectedConvId,
-                stepLabel: '📜 正在装载历史会话上下文…',
+                stepLabel: '💭 已注入新指令，正在思考…',
                 text: '',
                 thoughtTrace: [...allThoughtTrace],
               });
+              return;
             }
-          } else if (stType) {
-            const lastThought = allThoughtTrace[allThoughtTrace.length - 1];
-            const dynamicStepLabel = lastThought
-              ? `${lastThought.kind === 'thinking' ? '💭 ' : ''}${lastThought.text.replace(/\s+/g, ' ').slice(0, 60)}`
-              : '';
-            const stepMap = {
-              tool_call: '🔧 正在调用工具检查项目…',
-              command: '⚙ 正在执行命令验证…',
-              thinking: '💭 正在深度思考…',
-              agent_response: '✍ 正在整理结论…',
-            };
-            emitProgressSafe({
-              sessionId: detectedConvId,
-              stepLabel: sawCurrentUserInput
-                ? dynamicStepLabel || stepMap[stType] || `⚡ 正在执行步骤 (${stType})…`
-                : '📜 正在装载历史会话上下文…',
-              text: sawCurrentUserInput ? streamedResponse.trim() : '',
-              thoughtTrace: [...allThoughtTrace],
-            });
+            if (typeof su.thinking === 'string' && su.thinking.trim()) {
+              recordAgyThought('thinking', su.thinking.trim());
+            }
+            if (typeof su.thinking_delta === 'string' && su.thinking_delta.trim()) {
+              recordAgyThought('thinking', su.thinking_delta.trim());
+            }
+            syncAgyTranscriptDelta();
+            if (typeof su.text_delta === 'string' && su.text_delta) {
+              streamedResponse += su.text_delta;
+              if (sawCurrentUserInput) {
+                emitProgressSafe({
+                  sessionId: detectedConvId,
+                  stepLabel: '✍ 正在生成回复…',
+                  text: streamedResponse.trim(),
+                  thoughtTrace: [...allThoughtTrace],
+                });
+              } else {
+                emitProgressSafe({
+                  sessionId: detectedConvId,
+                  stepLabel: '📜 正在装载历史会话上下文…',
+                  text: '',
+                  thoughtTrace: [...allThoughtTrace],
+                });
+              }
+            } else if (stType) {
+              const lastThought = allThoughtTrace[allThoughtTrace.length - 1];
+              const dynamicStepLabel = lastThought
+                ? `${lastThought.kind === 'thinking' ? '💭 ' : ''}${lastThought.text.replace(/\s+/g, ' ').slice(0, 60)}`
+                : '';
+              const stepMap = {
+                tool_call: '🔧 正在调用工具检查项目…',
+                command: '⚙ 正在执行命令验证…',
+                thinking: '💭 正在深度思考…',
+                agent_response: '✍ 正在整理结论…',
+              };
+              emitProgressSafe({
+                sessionId: detectedConvId,
+                stepLabel: sawCurrentUserInput
+                  ? dynamicStepLabel || stepMap[stType] || `⚡ 正在执行步骤 (${stType})…`
+                  : '📜 正在装载历史会话上下文…',
+                text: sawCurrentUserInput ? streamedResponse.trim() : '',
+                thoughtTrace: [...allThoughtTrace],
+              });
+            }
+            return;
           }
-          return;
+          if (parsed.event === 'result' && parsed.result) {
+            if (parsed.result.conversation_id) {
+              detectedConvId = String(parsed.result.conversation_id).trim();
+            }
+            if (typeof parsed.result.response === 'string' && parsed.result.response.trim()) {
+              finalResultResponse = parsed.result.response.trim();
+            }
+            if (parsed.result.status === 'ERROR' && parsed.result.error) {
+              resultErrorMsg = String(parsed.result.error);
+            }
+            return;
+          }
+          // Backward-compatibility with single-object `--output-format json` mocks
+          if (parsed.response !== undefined || parsed.conversation_id) {
+            if (parsed.conversation_id) detectedConvId = String(parsed.conversation_id).trim();
+            if (typeof parsed.response === 'string' && parsed.response.trim()) {
+              finalResultResponse = parsed.response.trim();
+            }
+          }
+        } catch {
+          // ignore non-json line
         }
-        if (parsed.event === 'result' && parsed.result) {
-          if (parsed.result.conversation_id) {
-            detectedConvId = String(parsed.result.conversation_id).trim();
-          }
-          if (typeof parsed.result.response === 'string' && parsed.result.response.trim()) {
-            finalResultResponse = parsed.result.response.trim();
-          }
-          if (parsed.result.status === 'ERROR' && parsed.result.error) {
-            resultErrorMsg = String(parsed.result.error);
-          }
-          return;
+      };
+
+      const isExistingDesktopTurn =
+        mode === 'existing' &&
+        Boolean(sessionId) &&
+        (fs.existsSync(path.join(antigravityDataDir, 'conversations', `${sessionId}.db`)) ||
+          fs.existsSync(path.join(antigravityDataDir, 'annotations', `${sessionId}.pbtxt`)));
+
+      const finalizeDesktopVisibility = async ({ keepCliDb = false } = {}) => {
+        clearInterval(transcriptPollTimer);
+        syncAgyTranscriptDelta();
+        if (isExistingDesktopTurn) {
+          await restoreAntigravityDesktopTrajectory({
+            sessionId: detectedConvId || sessionId,
+            antigravityDataDir,
+            antigravityCliDataDir: cliDirForWatch,
+            keepCliDb,
+          }).catch(() => {});
         }
-        // Backward-compatibility with single-object `--output-format json` mocks
-        if (parsed.response !== undefined || parsed.conversation_id) {
-          if (parsed.conversation_id) detectedConvId = String(parsed.conversation_id).trim();
-          if (typeof parsed.response === 'string' && parsed.response.trim()) {
-            finalResultResponse = parsed.response.trim();
-          }
-        }
-      } catch {
-        // ignore non-json line
-      }
-    };
+      };
 
-    const isExistingDesktopTurn =
-      mode === 'existing' &&
-      Boolean(sessionId) &&
-      (fs.existsSync(path.join(antigravityDataDir, 'conversations', `${sessionId}.db`)) ||
-        fs.existsSync(path.join(antigravityDataDir, 'annotations', `${sessionId}.pbtxt`)));
-
-    let desktopVisibilityTimer = null;
-    if (isExistingDesktopTurn) {
-      desktopVisibilityTimer = setInterval(() => {
-        restoreAntigravityDesktopTrajectory({
-          sessionId: detectedConvId || sessionId,
-          antigravityDataDir,
-          antigravityCliDataDir: cliDirForWatch,
-          keepCliDb: true,
-        }).catch(() => {});
-      }, 2500);
-      desktopVisibilityTimer.unref?.();
-    }
-
-    const finalizeDesktopVisibility = async () => {
-      clearInterval(transcriptPollTimer);
-      syncAgyTranscriptDelta();
-      if (desktopVisibilityTimer) {
-        clearInterval(desktopVisibilityTimer);
-        desktopVisibilityTimer = null;
-      }
-      if (isExistingDesktopTurn) {
-        await restoreAntigravityDesktopTrajectory({
-          sessionId: detectedConvId || sessionId,
-          antigravityDataDir,
-          antigravityCliDataDir: cliDirForWatch,
-          keepCliDb: false,
-        }).catch(() => {});
-      }
-    };
-
-    const idleWatchdog = createDualActivityIdleWatchdog({
-      idleTimeoutMs: effectiveIdleMs,
-      getCandidateFiles: () => {
-        const files = [];
-        for (const dir of [antigravityDataDir, cliDirForWatch]) {
-          if (!dir) continue;
-          files.push(
-            path.join(dir, 'conversation_summaries.db'),
-            path.join(dir, 'conversation_summaries.db-wal')
-          );
+      const idleWatchdog = createDualActivityIdleWatchdog({
+        idleTimeoutMs: effectiveIdleMs,
+        getCandidateFiles: () => {
+          const files = [];
           if (detectedConvId) {
+            for (const dir of [antigravityDataDir, cliDirForWatch]) {
+              if (!dir) continue;
+              files.push(
+                path.join(dir, 'conversations', `${detectedConvId}.db`),
+                path.join(dir, 'conversations', `${detectedConvId}.db-wal`),
+                path.join(
+                  dir,
+                  'brain',
+                  detectedConvId,
+                  '.system_generated',
+                  'logs',
+                  'transcript.jsonl'
+                )
+              );
+            }
+          } else if (cliDirForWatch) {
             files.push(
-              path.join(dir, 'conversations', `${detectedConvId}.db`),
-              path.join(dir, 'conversations', `${detectedConvId}.db-wal`),
-              path.join(
-                dir,
-                'brain',
-                detectedConvId,
-                '.system_generated',
-                'logs',
-                'transcript.jsonl'
-              )
+              path.join(cliDirForWatch, 'conversation_summaries.db'),
+              path.join(cliDirForWatch, 'conversation_summaries.db-wal')
             );
           }
+          return files;
+        },
+        onIdleTimeout: async () => {
+          if (settled) return;
+          settled = true;
+          try {
+            child.kill();
+          } catch {}
+          await finalizeDesktopVisibility({ keepCliDb: false });
+          resolve({
+            ok: false,
+            sessionId: detectedConvId,
+            thoughtTrace: [...allThoughtTrace],
+            text: `⚠️ 目标 Antigravity 会话长时间无响应（已连续 ${idleLabel} 无新输出），已自动断开。请在桌面窗口查看或点击「仅重试 Antigravity」。`,
+          });
+        },
+      });
+
+      child.stdout.on('data', (chunk) => {
+        idleWatchdog.touch();
+        const str = chunk.toString('utf8');
+        stdout += str;
+        lineBuf += str;
+        const parts = lineBuf.split(/\r?\n/);
+        lineBuf = parts.pop() || '';
+        for (const p of parts) {
+          parseAgyStreamLine(p);
         }
-        return files;
-      },
-      onIdleTimeout: async () => {
+      });
+      child.stderr.on('data', (chunk) => {
+        idleWatchdog.touch();
+        stderr += chunk.toString('utf8');
+      });
+      child.on('error', async (err) => {
         if (settled) return;
         settled = true;
-        try {
-          child.kill();
-        } catch {}
-        await finalizeDesktopVisibility();
+        idleWatchdog.stop();
+        await finalizeDesktopVisibility({ keepCliDb: false });
         resolve({
           ok: false,
           sessionId: detectedConvId,
+          rawErr: err.message,
           thoughtTrace: [...allThoughtTrace],
-          text: `⚠️ 目标 Antigravity 会话长时间无响应（已连续 ${idleLabel} 无新输出），已自动断开。请在桌面窗口查看或点击「仅重试 Antigravity」。`,
+          text: `⚠️ 启动 Antigravity 会话失败：${err.message}`,
         });
-      },
-    });
+      });
+      child.on('close', async (code) => {
+        if (settled) return;
+        settled = true;
+        idleWatchdog.stop();
+        if (lineBuf.trim()) parseAgyStreamLine(lineBuf);
 
-    child.stdout.on('data', (chunk) => {
-      idleWatchdog.touch();
-      const str = chunk.toString('utf8');
-      stdout += str;
-      lineBuf += str;
-      const parts = lineBuf.split(/\r?\n/);
-      lineBuf = parts.pop() || '';
-      for (const p of parts) {
-        parseAgyStreamLine(p);
-      }
-    });
-    child.stderr.on('data', (chunk) => {
-      idleWatchdog.touch();
-      stderr += chunk.toString('utf8');
-    });
-    child.on('error', async (err) => {
-      if (settled) return;
-      settled = true;
-      idleWatchdog.stop();
-      await finalizeDesktopVisibility();
-      resolve({
-        ok: false,
-        sessionId: detectedConvId,
-        thoughtTrace: [...allThoughtTrace],
-        text: `⚠️ 启动 Antigravity 会话失败：${err.message}`,
+        const bestReply = finalResultResponse || streamedResponse.trim();
+        if (bestReply) {
+          await finalizeDesktopVisibility({ keepCliDb: false });
+          resolve({
+            ok: true,
+            sessionId: detectedConvId,
+            thoughtTrace:
+              segmentThoughtTrace.length > 0 ? [...segmentThoughtTrace] : [...allThoughtTrace],
+            text: bestReply,
+          });
+          return;
+        }
+
+        const rawErr = `${resultErrorMsg}\n${stderr}\n${stdout}`.trim();
+        const willRetryWithoutEffort = Boolean(
+          allowEffortRetry && includeEffort && isAgyEffortConflictError(rawErr)
+        );
+        await finalizeDesktopVisibility({ keepCliDb: willRetryWithoutEffort });
+
+        if (/lock|busy|already running|in use/i.test(rawErr)) {
+          resolve({
+            ok: false,
+            sessionId: detectedConvId,
+            rawErr,
+            thoughtTrace: [...allThoughtTrace],
+            text: '⚠️ 该 Antigravity 会话当前正在桌面窗口中运行另一轮任务（锁占用）。请等它当前轮跑完后点下方「仅重试 Antigravity」，或在上方切换为「➕ 在目录新建会话」。',
+          });
+          return;
+        }
+        if (/MODEL_PLACEHOLDER_/i.test(rawErr)) {
+          resolve({
+            ok: false,
+            sessionId: detectedConvId,
+            rawErr,
+            thoughtTrace: [...allThoughtTrace],
+            text: '⚠️ 该历史会话绑定了旧版已下线的内部测试模型枚举，CLI 无法直接续跑。请在上方目标会话切换为「➕ 在目录新建会话」继续。',
+          });
+          return;
+        }
+        resolve({
+          ok: false,
+          sessionId: detectedConvId,
+          rawErr,
+          thoughtTrace: [...allThoughtTrace],
+          text: `⚠️ Antigravity 目标会话执行异常（退出码 ${code}）：${rawErr.slice(0, 380) || '无输出'}`,
+        });
       });
     });
-    child.on('close', async (code) => {
-      if (settled) return;
-      settled = true;
-      idleWatchdog.stop();
-      if (lineBuf.trim()) parseAgyStreamLine(lineBuf);
-      await finalizeDesktopVisibility();
 
-      const bestReply = finalResultResponse || streamedResponse.trim();
-      if (bestReply) {
-        resolve({
-          ok: true,
-          sessionId: detectedConvId,
-          thoughtTrace:
-            segmentThoughtTrace.length > 0 ? [...segmentThoughtTrace] : [...allThoughtTrace],
-          text: bestReply,
-        });
-        return;
-      }
-
-      const rawErr = `${resultErrorMsg}\n${stderr}\n${stdout}`.trim();
-      if (/lock|busy|already running|in use/i.test(rawErr)) {
-        resolve({
-          ok: false,
-          sessionId: detectedConvId,
-          thoughtTrace: [...allThoughtTrace],
-          text: '⚠️ 该 Antigravity 会话当前正在桌面窗口中运行另一轮任务（锁占用）。请等它当前轮跑完后点下方「仅重试 Antigravity」，或在上方切换为「➕ 在目录新建会话」。',
-        });
-        return;
-      }
-      if (/MODEL_PLACEHOLDER_/i.test(rawErr)) {
-        resolve({
-          ok: false,
-          sessionId: detectedConvId,
-          thoughtTrace: [...allThoughtTrace],
-          text: '⚠️ 该历史会话绑定了旧版已下线的内部测试模型枚举，CLI 无法直接续跑。请在上方目标会话切换为「➕ 在目录新建会话」继续。',
-        });
-        return;
-      }
-      resolve({
-        ok: false,
-        sessionId: detectedConvId,
-        thoughtTrace: [...allThoughtTrace],
-        text: `⚠️ Antigravity 目标会话执行异常（退出码 ${code}）：${rawErr.slice(0, 380) || '无输出'}`,
-      });
-    });
+  const initialIncludeEffort = shouldPassAgyEffortFlag(effectiveAgyModel);
+  let agyTurnRes = await runSingleAgyProcess({
+    includeEffort: initialIncludeEffort,
+    allowEffortRetry: initialIncludeEffort,
   });
+  if (!agyTurnRes.ok && initialIncludeEffort && isAgyEffortConflictError(agyTurnRes.rawErr)) {
+    emitProgressSafe({
+      sessionId: agyTurnRes.sessionId || sessionId,
+      stepLabel: '🔄 当前模型不支持额外 --effort 参数，已自动切换为模型原生档位重试…',
+      text: '',
+    });
+    if (mode === 'existing' && sessionId) {
+      try {
+        const cliDir = resolveCliDataDir(antigravityDataDir, antigravityCliDataDir);
+        await ensureAntigravityCliTrajectory({
+          sessionId,
+          antigravityDataDir,
+          antigravityCliDataDir: cliDir,
+        });
+      } catch {
+        // non-fatal
+      }
+    }
+    agyTurnRes = await runSingleAgyProcess({
+      includeEffort: false,
+      allowEffortRetry: false,
+    });
+  }
+  const { rawErr: _unusedAgyRawErr, ...cleanAgyRes } = agyTurnRes;
+  return cleanAgyRes;
 }

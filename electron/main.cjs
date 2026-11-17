@@ -12,6 +12,7 @@ const {
   Notification,
   desktopCapturer,
 } = require('electron');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -363,15 +364,69 @@ function isSafeExternalUrl(rawUrl = '') {
   }
 }
 
+function computeLocalServerCodeVersion() {
+  try {
+    const serverDir = path.join(ROOT_DIR, 'server');
+    const files = fs
+      .readdirSync(serverDir)
+      .filter((f) => f.endsWith('.mjs'))
+      .sort();
+    const hash = crypto.createHash('sha256');
+    for (const rel of files) {
+      const full = path.join(serverDir, rel);
+      try {
+        hash.update(rel);
+        hash.update(fs.readFileSync(full));
+      } catch {
+        // ignore transient read error
+      }
+    }
+    return hash.digest('hex').slice(0, 12);
+  } catch {
+    return '';
+  }
+}
+
 async function detectExistingServer(port = 8866) {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 1200);
     const res = await fetch(`http://127.0.0.1:${port}/api/session`, { signal: ctrl.signal });
     clearTimeout(timer);
-    if (res.ok) {
-      return `http://127.0.0.1:${port}`;
+    if (!res.ok) return null;
+
+    const snap = await res.json().catch(() => null);
+    const expectedVer = computeLocalServerCodeVersion();
+    const isStale =
+      snap &&
+      !snap.activeWork &&
+      (snap.serverStale === true ||
+        !snap.bootServerVersion ||
+        (expectedVer && snap.bootServerVersion !== expectedVer));
+
+    if (isStale) {
+      appendLaunchLog('restarting-stale-server', {
+        port,
+        runningVer: snap.bootServerVersion || 'legacy',
+        expectedVer,
+      });
+      await fetch(`http://127.0.0.1:${port}/api/admin/shutdown`, { method: 'POST' }).catch(() => {});
+      for (let i = 0; i < 12; i += 1) {
+        await new Promise((r) => setTimeout(r, 120));
+        try {
+          const check = await fetch(`http://127.0.0.1:${port}/api/session`, {
+            signal: AbortSignal.timeout(300),
+          });
+          if (!check.ok) break;
+        } catch {
+          appendLaunchLog('restarted-stale-server', { port, expectedVer });
+          return null;
+        }
+      }
+      return null;
     }
+
+    return `http://127.0.0.1:${port}`;
   } catch {
     // Not running yet
   }

@@ -4232,6 +4232,39 @@ dialog.screen-crop-dialog {
   background: light-dark(#e0f2fe, rgba(14, 116, 144, 0.28));
 }
 
+.msg-act-btn.is-retry-single.is-retrying {
+  background: light-dark(#e0f2fe, rgba(14, 165, 233, 0.22));
+  border-color: light-dark(#38bdf8, rgba(56, 189, 248, 0.65));
+  opacity: 0.92;
+  cursor: progress;
+}
+
+.msg-act-btn.is-retry-single.is-dispatched {
+  color: light-dark(#15803d, #86efac);
+  border-color: light-dark(#86efac, rgba(34, 197, 94, 0.45));
+  background: light-dark(#dcfce7, rgba(34, 197, 94, 0.16));
+}
+
+.msg-row.is-retried-origin .msg-bubble.is-error-bubble {
+  opacity: 0.78;
+}
+
+.retry-dispatched-pill {
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid light-dark(#bae6fd, rgba(56, 189, 248, 0.35));
+  background: light-dark(#f0f9ff, rgba(14, 165, 233, 0.14));
+  color: light-dark(#0369a1, #7dd3fc);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.retry-dispatched-pill:hover {
+  background: light-dark(#e0f2fe, rgba(14, 165, 233, 0.24));
+}
+
 /* Instant Tail Pagination Load-More Banner */
 .load-more-history-wrap {
   display: flex;
@@ -5311,7 +5344,7 @@ summary.itb-summary:focus-visible {
 
 /* Session Routing Modal (<dialog id="sessionRoutingDialog" closedby="any">) */
 dialog.session-routing-dialog[open] {
-  width: min(680px, calc(100dvw - 24px));
+  width: min(760px, calc(100dvw - 24px));
   max-height: min(88dvh, 760px);
   display: flex;
   flex-direction: column;
@@ -5407,7 +5440,9 @@ dialog.session-routing-dialog[open] {
 }
 
 .srd-provider-select,
-.srd-label-input {
+.srd-label-input,
+.srd-model-select,
+.srd-custom-model-input {
   min-height: 28px;
   padding: 2px 7px;
   border-radius: 6px;
@@ -5418,8 +5453,32 @@ dialog.session-routing-dialog[open] {
 }
 
 .srd-label-input {
-  width: 112px;
-  min-width: 84px;
+  width: 96px;
+  min-width: 76px;
+}
+
+.srd-model-select {
+  max-width: 208px;
+  min-width: 132px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.srd-custom-model-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.drawer-inline-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.profile-model-select {
+  min-height: 28px;
 }
 
 .srd-role-btn {
@@ -5508,6 +5567,9 @@ dialog.session-routing-dialog[open] {
 .srd-role-btn:focus-visible,
 .srd-provider-select:focus-visible,
 .srd-label-input:focus-visible,
+.srd-model-select:focus-visible,
+.srd-custom-model-input:focus-visible,
+.profile-model-select:focus-visible,
 .srd-remove-btn:focus-visible {
   outline: 2px solid var(--brand-primary);
   outline-offset: 2px;
@@ -5547,10 +5609,17 @@ dialog.session-routing-dialog[open] {
   .srd-role-btn,
   .srd-provider-select,
   .srd-label-input,
+  .srd-model-select,
+  .srd-custom-model-input,
+  .profile-model-select,
   .srd-session-select,
   .srd-remove-btn {
     min-height: 36px;
     font-size: 16px;
+  }
+  .srd-model-select {
+    max-width: 100%;
+    flex: 1 1 100%;
   }
   .srd-inner {
     padding: 14px 12px;

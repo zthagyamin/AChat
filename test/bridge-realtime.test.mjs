@@ -129,7 +129,7 @@ test('Speed gear command builders & setGroupSpeedGear preserve read-only sandbox
   assert.equal(detectActorSpeedGear(deepCodex), 'deep');
 
   const fastAgy = buildAntigravityLaunchCommand('C:\\bin\\agy.exe', { gear: 'fast' });
-  assert.match(fastAgy, /--model gemini-3\.8-flash-low/);
+  assert.match(fastAgy, /--model gemini-4-hydrogen-low/);
   assert.match(fastAgy, /--disable-slash-commands/);
   assert.doesNotMatch(fastAgy, /--effort/);
   assert.equal(detectActorSpeedGear(fastAgy), 'fast');
@@ -3310,12 +3310,13 @@ test('v2.0.2 Codex Writer-Lock Auto-Recovery, Busy Detection & 2026 Model Preset
     assert.equal(turnRes.forkedFromSessionId, idleThreadId);
     assert.match(turnRes.text, /含历史上下文/);
 
-    // D. Verify 2026 Model Catalog & Dynamic Models Cache Sync
+    // D. Verify 2026 Model Catalog, Legacy Filter & Dynamic Models Cache Sync
     assert.ok(PROVIDER_CATALOG_META.codex.models.includes('gpt-6-astra'));
     assert.ok(PROVIDER_CATALOG_META.codex.models.includes('gpt-6.1-sol'));
-    assert.ok(PROVIDER_CATALOG_META.antigravity.models.includes('gemini-4-argon-high'));
-    assert.ok(PROVIDER_CATALOG_META.antigravity.models.includes('gemini-3.8-flash-high'));
+    assert.ok(PROVIDER_CATALOG_META.antigravity.models.includes('gemini-4-carbon-high'));
+    assert.ok(PROVIDER_CATALOG_META.antigravity.models.includes('gemini-4-hydrogen-high'));
     assert.ok(PROVIDER_CATALOG_META.antigravity.models.includes('claude-opus-5-5-high'));
+    assert.ok(!PROVIDER_CATALOG_META.antigravity.models.includes('gemini-3.8-flash-low'));
     assert.ok(!PROVIDER_CATALOG_META.antigravity.models.some((m) => m.includes('gemini-2.5')));
 
     await fsp.writeFile(
@@ -3341,9 +3342,9 @@ test('v2.0.2 Codex Writer-Lock Auto-Recovery, Busy Detection & 2026 Model Preset
     assert.match(customCxCmd, /model="gpt-6-astra"/);
     const customAgCmd = buildAntigravityLaunchCommand('agy', {
       gear: 'deep',
-      model: 'gemini-4-argon-high',
+      model: 'gemini-4-carbon-high',
     });
-    assert.match(customAgCmd, /--model gemini-4-argon-high/);
+    assert.match(customAgCmd, /--model gemini-4-carbon-high/);
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
@@ -4118,9 +4119,14 @@ test('restoreAntigravityDesktopTrajectory & discoverLocalSessions permanently pr
     assert.equal(res.truncatedCliStub, true);
     assert.equal(res.title, 'Clash Royale AI Research Setup');
 
-    // CLI DB must exist as a 0-byte sentinel stub (not deleted, and not >0 bytes)
+    // CLI DB must exist as an idle trajectory_type=22, 0-step SQLite sentinel stub (never unlinked or 0-byte)
     assert.equal(fs.existsSync(cliConvPath), true);
-    assert.equal(fs.statSync(cliConvPath).size, 0);
+    const stubCheck1 = new DatabaseSync(cliConvPath, { readOnly: true });
+    const stubMeta1 = stubCheck1.prepare('SELECT trajectory_type FROM trajectory_meta LIMIT 1').get();
+    const stubSteps1 = stubCheck1.prepare('SELECT COUNT(*) AS c FROM steps').get();
+    stubCheck1.close();
+    assert.equal(stubMeta1.trajectory_type, 22);
+    assert.equal(stubSteps1.c, 0);
 
     // Desktop DB must now contain step 11 synced back from CLI
     const checkDeskTraj = new DatabaseSync(deskConvPath, { readOnly: true });
@@ -4140,7 +4146,7 @@ test('restoreAntigravityDesktopTrajectory & discoverLocalSessions permanently pr
     assert.equal(row.status, 'CASCADE_RUN_STATUS_IDLE');
     assert.equal(row.source, '');
 
-    // 5. Next CLI turn must recognize the 0-byte stub and re-bridge Desktop -> CLI cleanly
+    // 5. Next CLI turn must recognize the trajectory_type=22 0-step stub and re-bridge Desktop -> CLI cleanly
     const bridge2 = await ensureAntigravityCliTrajectory({
       sessionId,
       antigravityDataDir: deskDir,
@@ -4148,14 +4154,23 @@ test('restoreAntigravityDesktopTrajectory & discoverLocalSessions permanently pr
     });
     assert.equal(bridge2.bridged, true);
     assert.equal(fs.statSync(cliConvPath).size > 0, true);
+    const bridgedCheck = new DatabaseSync(cliConvPath, { readOnly: true });
+    const bridgedSteps = bridgedCheck.prepare('SELECT step_index FROM trajectory_steps ORDER BY step_index').all();
+    bridgedCheck.close();
+    assert.equal(bridgedSteps.length, 2);
 
-    // 6. discoverLocalSessions must auto-heal any idle non-empty CLI copy back to 0-byte stub
+    // 6. discoverLocalSessions must auto-heal any idle non-stub CLI copy back to trajectory_type=22 0-step stub
     const discovered = await discoverLocalSessions({
       codexHomeDir: codexHome,
       antigravityDataDir: deskDir,
       antigravityCliDataDir: cliDir,
     });
-    assert.equal(fs.statSync(cliConvPath).size, 0);
+    const stubCheck2 = new DatabaseSync(cliConvPath, { readOnly: true });
+    const stubMeta2 = stubCheck2.prepare('SELECT trajectory_type FROM trajectory_meta LIMIT 1').get();
+    const stubSteps2 = stubCheck2.prepare('SELECT COUNT(*) AS c FROM steps').get();
+    stubCheck2.close();
+    assert.equal(stubMeta2.trajectory_type, 22);
+    assert.equal(stubSteps2.c, 0);
     assert.equal(
       discovered.antigravity.some((s) => s.id === sessionId && s.title === 'Clash Royale AI Research Setup'),
       true
@@ -4967,6 +4982,973 @@ test('35. Minimalist UI declutter & multi-session modal contracts comply with Mo
   assert.match(appMjs, /state\.openIdeSlotDetails/);
   assert.match(appMjs, /detailsEl\s*=\s*document\.createElement\('details'\)/);
   assert.doesNotMatch(appMjs, /className\s*=\s*['"][^'"]*msg-insight/);
+});
+
+test('36. Silent auto-updating model catalog, legacy filter, disk cache fallback & per-slot independent model routing', async () => {
+  const os = await import('node:os');
+  const {
+    detectProviderEcosystem,
+    isLegacyFilteredModel,
+    parseAgyModelsOutput,
+  } = await import('../server/fusion-hub.mjs');
+
+  assert.equal(isLegacyFilteredModel('antigravity', 'gemini-3.8-flash-low'), true);
+  assert.equal(isLegacyFilteredModel('antigravity', 'gemini-4-argon-high'), true);
+  assert.equal(isLegacyFilteredModel('antigravity', 'gemini-pro-orchestrator-argon'), true);
+  assert.equal(isLegacyFilteredModel('antigravity', 'gemini-4-hydrogen-low'), false);
+  assert.equal(isLegacyFilteredModel('antigravity', 'gemini-4-carbon-high'), false);
+  assert.equal(isLegacyFilteredModel('codex', 'gpt-5.6-sol'), true);
+  assert.equal(isLegacyFilteredModel('codex', 'gpt-6.1-sol'), false);
+
+  const parsedAgy = parseAgyModelsOutput(
+    [
+      'Fetching available models...',
+      'gemini-5-nova-high\tGemini 5 Nova (High)',
+      'gemini-4-carbon-high\tGemini 4 Carbon (High)',
+      'gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)',
+      'gemini-4-argon-low\tGemini 4 Argon (Low)',
+      'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)',
+    ].join('\n')
+  );
+  assert.ok(parsedAgy.some((m) => m.id === 'gemini-5-nova-high' && m.legacy === false));
+  assert.ok(parsedAgy.some((m) => m.id === 'gemini-4-argon-low' && m.legacy === true));
+  assert.ok(parsedAgy.some((m) => m.id === 'gemini-3.8-flash-low' && m.legacy === true));
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.default.tmpdir(), 'achat-autoupdate-models-'));
+  const dataDir = path.join(tmpRoot, 'data');
+  const groupsDir = path.join(tmpRoot, 'groups');
+  const codexHome = path.join(tmpRoot, 'codex-home');
+  const agyHome = path.join(tmpRoot, 'agy-home');
+  const projDir = path.join(tmpRoot, 'proj');
+  const groupId = 'g_model_slots';
+  fs.mkdirSync(path.join(groupsDir, groupId), { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(agyHome, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+  fs.writeFileSync(path.join(groupsDir, groupId, 'ledger.jsonl'), '', 'utf8');
+
+  fs.writeFileSync(
+    path.join(codexHome, 'models_cache.json'),
+    JSON.stringify({
+      models: [
+        { slug: 'gpt-6.1-sol', display_name: 'GPT-6.1-Sol', description: 'Workhorse', visibility: 'list', priority: 1 },
+        { slug: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol', description: 'Older', visibility: 'list', priority: 7 },
+        { slug: 'gpt-reserve', display_name: 'GPT-Reserve', description: 'Hidden', visibility: 'hide', priority: 5 },
+        { slug: 'codex-auto-review', display_name: 'Codex Auto Review', description: 'Internal', visibility: 'hide', priority: 10 },
+      ],
+    }),
+    'utf8'
+  );
+
+  let bridge = null;
+  try {
+    const ecoLive = await detectProviderEcosystem({
+      force: true,
+      codexHomeDir: codexHome,
+      dataDir,
+      agyModelsRunnerOverride: async () =>
+        [
+          'Fetching available models...',
+          'gemini-5-nova-high\tGemini 5 Nova (High)',
+          'gemini-4-carbon-high\tGemini 4 Carbon (High)',
+          'gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)',
+          'gemini-4-argon-low\tGemini 4 Argon (Low)',
+          'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)',
+        ].join('\n'),
+    });
+    const agyLive = ecoLive.providers.find((p) => p.id === 'antigravity');
+    const cxLive = ecoLive.providers.find((p) => p.id === 'codex');
+    assert.equal(agyLive.modelSource, 'live');
+    assert.ok(agyLive.models.includes('gemini-5-nova-high'));
+    assert.ok(agyLive.models.includes('gemini-4-carbon-high'));
+    assert.ok(agyLive.models.includes('gemini-4-hydrogen-high'));
+    assert.ok(!agyLive.models.includes('gemini-4-argon-low'));
+    assert.ok(!agyLive.models.includes('gemini-3.8-flash-low'));
+    assert.ok(agyLive.allModels.includes('gemini-4-argon-low'));
+
+    assert.ok(cxLive.models.includes('gpt-6.1-sol'));
+    assert.ok(!cxLive.models.includes('gpt-5.6-sol'));
+    assert.ok(!cxLive.allModels.includes('gpt-reserve'));
+    assert.ok(!cxLive.allModels.includes('codex-auto-review'));
+
+    const cacheFile = path.join(dataDir, 'models-catalog-cache.json');
+    assert.equal(fs.existsSync(cacheFile), true);
+
+    const ecoFallback = await detectProviderEcosystem({
+      force: true,
+      codexHomeDir: codexHome,
+      dataDir,
+      agyModelsRunnerOverride: async () => {
+        throw new Error('agy CLI timeout');
+      },
+    });
+    const agyCached = ecoFallback.providers.find((p) => p.id === 'antigravity');
+    assert.equal(agyCached.modelSource, 'cache');
+    assert.ok(agyCached.models.includes('gemini-5-nova-high'));
+
+    // Per-slot independent model routing in CcccBridge
+    const extCalls = [];
+    bridge = new CcccBridge({
+      dataDir,
+      groupsDir,
+      codexHomeDir: codexHome,
+      antigravityDataDir: agyHome,
+      externalSessionRunnerOverride: async (params) => {
+        extCalls.push({ slotId: params.slotId, model: params.model, phase: params.phase });
+        if (params.phase === 'lead_review') {
+          return {
+            ok: true,
+            sessionId: params.sessionId,
+            text: '验收通过<!--achat-review:{"approved":true,"feedback":"OK"}-->',
+          };
+        }
+        return { ok: true, sessionId: params.sessionId, text: `${params.slotId} done` };
+      },
+      execCcccOverride: async () => ({ stdout: '{}', stderr: '' }),
+      execJsonOverride: async (args) => {
+        if (args[0] === 'groups') return { groups: [{ group_id: groupId, title: 'Model Slots', running: true }] };
+        if (args[0] === 'group' && args[1] === 'show') {
+          return {
+            effective_scope: { path: projDir },
+            group: {
+              group_id: groupId,
+              title: 'Model Slots',
+              scopes: [{ scope_key: 's1', label: 'proj', url: projDir }],
+              actors: [
+                { id: 'codex', title: 'Codex', runtime: 'codex', command: ['codex'] },
+                { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', command: ['agy'] },
+              ],
+            },
+          };
+        }
+        if (args[0] === 'actor' && args[1] === 'list') {
+          return {
+            actors: [
+              { id: 'codex', title: 'Codex', runtime: 'codex', running: true, enabled: true, command: ['codex'] },
+              { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', running: true, enabled: true, command: ['agy'] },
+            ],
+          };
+        }
+        return {};
+      },
+    });
+    await bridge.ensureFileHelperSeed();
+    await bridge.readGroupLedger(groupId);
+    await bridge.setGroupPrefs(groupId, {
+      sessionRouting: {
+        enabled: true,
+        flow: 'direct',
+        permission: 'workspace-write',
+        autoReview: true,
+        slots: [
+          { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'lead', model: 'gpt-6-astra', mode: 'existing', sessionId: 'cx-1', cwd: projDir },
+          { slotId: 'agy-1', provider: 'antigravity', label: 'AG-1', role: 'peer', model: 'gemini-4-carbon-high', mode: 'existing', sessionId: 'ag-1', cwd: projDir },
+          { slotId: 'agy-2', provider: 'antigravity', label: 'AG-2', role: 'peer', model: 'gemini-4-hydrogen-high', mode: 'existing', sessionId: 'ag-2', cwd: projDir },
+        ],
+      },
+    });
+    await bridge.sendGroupMessage(groupId, { text: '验证多槽位独立模型', to: ['@all'] });
+    for (let i = 0; i < 60 && extCalls.length < 3; i += 1) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(extCalls.length, 3);
+    assert.equal(extCalls.find((c) => c.slotId === 'agy-1')?.model, 'gemini-4-carbon-high');
+    assert.equal(extCalls.find((c) => c.slotId === 'agy-2')?.model, 'gemini-4-hydrogen-high');
+    assert.equal(extCalls.find((c) => c.slotId === 'codex' && c.phase === 'lead_review')?.model, 'gpt-6-astra');
+
+    // UI & modern-web-guidance static assertions
+    const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+    const appMjs = fs.readFileSync(new URL('../public/app.mjs', import.meta.url), 'utf8');
+    assert.match(html, /id="toggleDrawerLegacyModelsBtn"/);
+    assert.match(html, /id="refreshDrawerModelsBtn"/);
+    assert.match(html, /id="refreshRoutingModelsBtn"/);
+    assert.match(html, /id="toggleRoutingLegacyModelsBtn"/);
+    assert.doesNotMatch(html, /gemini-3\.8-flash|gemini-4-argon/i);
+    assert.match(appMjs, /srd-model-select/);
+    assert.match(appMjs, /srd-custom-model-input/);
+    assert.match(appMjs, /function populateModelSelectElement\(/);
+    assert.match(appMjs, /function isClientLegacyModel\(/);
+    assert.match(appMjs, /autocorrect\s*=\s*'off'/);
+  } finally {
+    bridge?.stop?.();
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+test('37. Server code freshness fingerprint, slot.model persistence round-trip & speedGear with custom Antigravity model', async () => {
+  const os = await import('node:os');
+  const { computeServerCodeVersion, startAgentWeChatServer } = await import('../server/index.mjs');
+
+  const ver = await computeServerCodeVersion();
+  assert.match(ver, /^[0-9a-f]{12}$/);
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.default.tmpdir(), 'achat-persist-fix-'));
+  const dataDir = path.join(tmpRoot, 'data');
+  const groupsDir = path.join(tmpRoot, 'groups');
+  const uploadsDir = path.join(tmpRoot, 'uploads');
+  const projDir = path.join(tmpRoot, 'proj');
+  const gid = 'g_persist_fix';
+  fs.mkdirSync(path.join(groupsDir, gid), { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+  fs.writeFileSync(path.join(groupsDir, gid, 'ledger.jsonl'), '', 'utf8');
+
+  let actorCommands = {
+    codex: ['codex', '-c', 'model_reasoning_effort=high', '-s', 'read-only', '-a', 'never'],
+    antigravity: ['agy', '--dangerously-skip-permissions', '--model', 'gemini-4-carbon-high'],
+  };
+
+  const srv = await startAgentWeChatServer({
+    port: 0,
+    host: '127.0.0.1',
+    enableTunnel: false,
+    dataDir,
+    uploadsDir,
+    startInStandby: true,
+    idleStandbyMs: 60_000,
+    bridgeOptions: {
+      groupsDir,
+      composerMinWaitMs: 0,
+      composerPollIntervalMs: 5,
+      allowStandbyExecInTests: true,
+      execCcccOverride: async (args) => {
+        if (args[0] === 'actor' && args[1] === 'update') {
+          const cmdIdx = args.indexOf('--command');
+          const actorId = args[args.length - 1];
+          if (cmdIdx >= 0 && actorId in actorCommands) {
+            actorCommands[actorId] = String(args[cmdIdx] || '').split(/\s+/);
+          }
+        }
+        if (args[0] === 'status') return { stdout: 'Daemon: running\n', stderr: '' };
+        return { stdout: '', stderr: '' };
+      },
+      execJsonOverride: async (args) => {
+        if (args[0] === 'groups') {
+          return {
+            groups: [{ group_id: gid, title: 'Persist Test', running: true, state: 'active' }],
+          };
+        }
+        if (args[0] === 'group' && args[1] === 'show') {
+          return {
+            effective_scope: { path: projDir },
+            group: {
+              group_id: gid,
+              title: 'Persist Test',
+              scopes: [{ scope_key: 's1', label: 'proj', url: projDir }],
+              actors: [
+                { id: 'codex', title: 'Codex', runtime: 'codex', command: actorCommands.codex },
+                { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', command: actorCommands.antigravity },
+              ],
+            },
+          };
+        }
+        if (args[0] === 'actor' && args[1] === 'list') {
+          return {
+            actors: [
+              { id: 'codex', title: 'Codex', runtime: 'codex', running: true, enabled: true, command: actorCommands.codex },
+              { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', running: true, enabled: true, command: actorCommands.antigravity },
+            ],
+          };
+        }
+        return {};
+      },
+    },
+  });
+
+  try {
+    // 1. /api/session reports bootServerVersion, serverVersion, and serverStale === false
+    const sessRes = await fetch(`${srv.url}/api/session`);
+    assert.equal(sessRes.status, 200);
+    const sessJson = await sessRes.json();
+    assert.equal(sessJson.bootServerVersion, ver);
+    assert.equal(sessJson.serverVersion, ver);
+    assert.equal(sessJson.serverStale, false);
+
+    // 2. setGroupPrefs + listGroups({ force: true }) preserves per-slot model across all 3 slots
+    await srv.bridge.setGroupPrefs(gid, {
+      agentProfiles: {
+        antigravity: { displayName: '', model: 'gemini-4-carbon-high', persona: '' },
+      },
+      sessionRouting: {
+        enabled: true,
+        flow: 'direct',
+        permission: 'workspace-write',
+        autoReview: true,
+        slots: [
+          { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'lead', model: 'gpt-6-astra', mode: 'existing', sessionId: 'cx-p1', cwd: projDir },
+          { slotId: 'antigravity', provider: 'antigravity', label: 'AG-1', role: 'peer', model: 'gemini-4-carbon-high', mode: 'existing', sessionId: 'ag-p1', cwd: projDir },
+          { slotId: 'agy-1', provider: 'antigravity', label: 'AG-2', role: 'peer', model: 'gemini-4-hydrogen-high', mode: 'existing', sessionId: 'ag-p2', cwd: projDir },
+        ],
+      },
+    });
+    const afterPrefs = await srv.bridge.listGroups({ force: true });
+    const grp = afterPrefs.find((g) => g.id === gid);
+    assert.equal(grp?.sessionRouting?.slots?.[0]?.model, 'gpt-6-astra');
+    assert.equal(grp?.sessionRouting?.slots?.[1]?.model, 'gemini-4-carbon-high');
+    assert.equal(grp?.sessionRouting?.slots?.[2]?.model, 'gemini-4-hydrogen-high');
+
+    // 3. setGroupSpeedGear('fast') persists g.speedGear === 'fast' even when custom model is set
+    const afterGear = await srv.bridge.setGroupSpeedGear(gid, 'fast');
+    const grpFast = afterGear.find((g) => g.id === gid);
+    assert.equal(grpFast?.speedGear, 'fast');
+    assert.equal(grpFast?.sessionRouting?.slots?.[2]?.model, 'gemini-4-hydrogen-high');
+  } finally {
+    await srv.close();
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+test('38. Antigravity --model + --effort compatibility & automatic effortless fallback retry', async () => {
+  const os = await import('node:os');
+  const {
+    shouldPassAgyEffortFlag,
+    executeExternalAgentTurn,
+  } = await import('../server/session-router.mjs');
+
+  assert.equal(shouldPassAgyEffortFlag('gemini-pro-orchestrator'), false);
+  assert.equal(shouldPassAgyEffortFlag('gemini-pro-orchestrator-argon'), false);
+  assert.equal(shouldPassAgyEffortFlag('gemini-4-carbon-high'), false);
+  assert.equal(shouldPassAgyEffortFlag('gemini-4-carbon-low'), false);
+  assert.equal(shouldPassAgyEffortFlag('gemini-4-hydrogen-xhigh'), false);
+  assert.equal(shouldPassAgyEffortFlag('gpt-oss-120b-medium'), false);
+  assert.equal(shouldPassAgyEffortFlag('claude-sonnet-5-5-low'), false);
+  assert.equal(shouldPassAgyEffortFlag(''), true);
+  assert.equal(shouldPassAgyEffortFlag('gemini-4-carbon'), true);
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.default.tmpdir(), 'achat-agy-effort-'));
+  const agyHome = path.join(tmpRoot, 'agy');
+  const cliHome = path.join(tmpRoot, 'agy-cli');
+  const projDir = path.join(tmpRoot, 'proj');
+  fs.mkdirSync(agyHome, { recursive: true });
+  fs.mkdirSync(cliHome, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+
+  const callsLog = path.join(tmpRoot, 'agy-calls.jsonl');
+  const mockAgyScript = path.join(tmpRoot, 'mock-agy-effort.mjs');
+  fs.writeFileSync(
+    mockAgyScript,
+    `
+    import fs from 'node:fs';
+    const args = process.argv.slice(2);
+    const getArg = (flag) => {
+      const idx = args.indexOf(flag);
+      return idx >= 0 ? String(args[idx + 1] || '') : '';
+    };
+    const model = getArg('--model');
+    const effort = getArg('--effort');
+    fs.appendFileSync(${JSON.stringify(callsLog)}, JSON.stringify({ model, effort, args }) + '\\n', 'utf8');
+
+    if ((model === 'gemini-pro-orchestrator' || model === 'gemini-5-director') && effort) {
+      const msg = \`invalid model selection (--model "\${model}" --effort "\${effort}"): --effort is not supported for model "\${model}"\`;
+      console.error(\`error: \${msg}\`);
+      console.log(JSON.stringify({ event: 'result', result: { conversation_id: '', status: 'ERROR', response: '', error: msg } }));
+      process.exit(1);
+    }
+    const suffixMatch = model.match(/-(low|medium|high|xhigh|max|ultra)$/);
+    if (suffixMatch && effort && suffixMatch[1] !== effort) {
+      const msg = \`invalid model selection (--model "\${model}" --effort "\${effort}"): --model \${model} conflicts with --effort=\${effort}\`;
+      console.error(\`error: \${msg}\`);
+      console.log(JSON.stringify({ event: 'result', result: { conversation_id: '', status: 'ERROR', response: '', error: msg } }));
+      process.exit(1);
+    }
+    console.log(JSON.stringify({ event: 'init', conversation_id: 'conv-effort-test' }));
+    console.log(JSON.stringify({ event: 'result', result: { conversation_id: 'conv-effort-test', status: 'DONE', response: \`OK:\${model || 'default'}:\${effort || 'none'}\` } }));
+    `,
+    'utf8'
+  );
+
+  const readCalls = () =>
+    fs
+      .readFileSync(callsLog, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+
+  try {
+    // 1. Orchestrator model skips --effort immediately and succeeds on first spawn
+    const orchRes = await executeExternalAgentTurn({
+      agent: 'antigravity',
+      mode: 'new',
+      cwd: projDir,
+      prompt: 'test orchestrator',
+      gear: 'deep',
+      model: 'gemini-pro-orchestrator',
+      agyBin: process.execPath,
+      agyExtraLeadArgs: [mockAgyScript],
+      antigravityDataDir: agyHome,
+      antigravityCliDataDir: cliHome,
+    });
+    assert.equal(orchRes.ok, true);
+    assert.equal(orchRes.text, 'OK:gemini-pro-orchestrator:none');
+
+    // 2. Fixed medium model under deep gear skips --effort immediately
+    const ossRes = await executeExternalAgentTurn({
+      agent: 'antigravity',
+      mode: 'new',
+      cwd: projDir,
+      prompt: 'test oss medium',
+      gear: 'deep',
+      model: 'gpt-oss-120b-medium',
+      agyBin: process.execPath,
+      agyExtraLeadArgs: [mockAgyScript],
+      antigravityDataDir: agyHome,
+      antigravityCliDataDir: cliHome,
+    });
+    assert.equal(ossRes.ok, true);
+    assert.equal(ossRes.text, 'OK:gpt-oss-120b-medium:none');
+
+    // 3. Default model (empty) under deep gear still receives --effort high
+    const defRes = await executeExternalAgentTurn({
+      agent: 'antigravity',
+      mode: 'new',
+      cwd: projDir,
+      prompt: 'test default deep',
+      gear: 'deep',
+      model: '',
+      agyBin: process.execPath,
+      agyExtraLeadArgs: [mockAgyScript],
+      antigravityDataDir: agyHome,
+      antigravityCliDataDir: cliHome,
+    });
+    assert.equal(defRes.ok, true);
+    assert.equal(defRes.text, 'OK:default:high');
+
+    // 4. Unknown future model without suffix rejects --effort first, then auto-retries cleanly without --effort
+    const progressEvents = [];
+    const fallbackRes = await executeExternalAgentTurn({
+      agent: 'antigravity',
+      mode: 'new',
+      cwd: projDir,
+      prompt: 'test fallback retry',
+      gear: 'deep',
+      model: 'gemini-5-director',
+      agyBin: process.execPath,
+      agyExtraLeadArgs: [mockAgyScript],
+      antigravityDataDir: agyHome,
+      antigravityCliDataDir: cliHome,
+      onProgress: (ev) => progressEvents.push(ev),
+    });
+    assert.equal(fallbackRes.ok, true);
+    assert.equal(fallbackRes.text, 'OK:gemini-5-director:none');
+    assert.ok(progressEvents.some((ev) => /不支持额外 --effort/.test(ev.stepLabel || '')));
+
+    const recorded = readCalls();
+    // 1 (orch) + 1 (oss) + 1 (def) + 2 (fallback failed + retried) = 5 total spawns
+    assert.equal(recorded.length, 5);
+    assert.equal(recorded[0].effort, '');
+    assert.equal(recorded[1].effort, '');
+    assert.equal(recorded[2].effort, 'high');
+    assert.equal(recorded[3].model, 'gemini-5-director');
+    assert.equal(recorded[3].effort, 'high');
+    assert.equal(recorded[4].model, 'gemini-5-director');
+    assert.equal(recorded[4].effort, '');
+  } finally {
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+test('39. Multi-session external retry routing, internal actor auto-stop & UI retry/stream cleanup contracts', async () => {
+  const os = await import('node:os');
+  const { isGroupFullyExternallyRouted, normalizeSessionRouting } = await import(
+    '../server/session-router.mjs'
+  );
+  const { CcccBridge } = await import('../server/cccc-bridge.mjs');
+
+  assert.equal(isGroupFullyExternallyRouted(null), false);
+  assert.equal(
+    isGroupFullyExternallyRouted({
+      enabled: false,
+      slots: [{ slotId: 'codex', provider: 'codex', mode: 'new' }],
+    }),
+    false
+  );
+  assert.equal(
+    isGroupFullyExternallyRouted(
+      normalizeSessionRouting({
+        enabled: false,
+        slots: [{ slotId: 'codex', provider: 'codex', mode: 'group' }],
+      })
+    ),
+    false
+  );
+  assert.equal(
+    isGroupFullyExternallyRouted(
+      normalizeSessionRouting({
+        enabled: true,
+        slots: [
+          { slotId: 'codex', provider: 'codex', mode: 'existing', sessionId: 'cx-1' },
+          { slotId: 'antigravity', provider: 'antigravity', mode: 'group' },
+        ],
+      })
+    ),
+    false
+  );
+  assert.equal(
+    isGroupFullyExternallyRouted(
+      normalizeSessionRouting({
+        enabled: true,
+        slots: [
+          { slotId: 'codex', provider: 'codex', mode: 'existing', sessionId: 'cx-1' },
+          { slotId: 'antigravity', provider: 'antigravity', mode: 'existing', sessionId: 'ag-1' },
+          { slotId: 'agy-1', provider: 'antigravity', mode: 'existing', sessionId: 'ag-2' },
+        ],
+      })
+    ),
+    true
+  );
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.default.tmpdir(), 'achat-ext-retry-stop-'));
+  const dataDir = path.join(tmpRoot, 'data');
+  const groupsDir = path.join(tmpRoot, 'groups');
+  const projDir = path.join(tmpRoot, 'proj');
+  const groupId = 'g_ext_retry_stop';
+  fs.mkdirSync(path.join(groupsDir, groupId), { recursive: true });
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(projDir, { recursive: true });
+
+  // Internal ledger has a user prompt and pending codex activity to simulate leftover/rogue internal state
+  fs.writeFileSync(
+    path.join(groupsDir, groupId, 'ledger.jsonl'),
+    [
+      JSON.stringify({
+        v: 1,
+        id: 'u-task-1',
+        ts: '2026-11-17T06:00:00.000Z',
+        kind: 'chat.message',
+        by: 'user',
+        data: { text: '请并行核对训练与视觉指标', to: ['@all'] },
+      }),
+      JSON.stringify({
+        v: 1,
+        id: 'u-pend-1',
+        ts: new Date().toISOString(),
+        kind: 'chat.message',
+        by: 'user',
+        data: { text: '跟进检查', to: ['codex'] },
+      }),
+    ].join('\n') + '\n',
+    'utf8'
+  );
+
+  const actorRunning = { codex: true, antigravity: true };
+  const stopCommands = [];
+  const startCommands = [];
+  const extRetryCalls = [];
+
+  const bridge = new CcccBridge({
+    dataDir,
+    groupsDir,
+    enableWatchdogInTests: true,
+    externalSessionRunnerOverride: async (params) => {
+      extRetryCalls.push({ slotId: params.slotId, sessionId: params.sessionId, prompt: params.prompt });
+      return { ok: true, sessionId: params.sessionId, text: `${params.slotId} recovered` };
+    },
+    execCcccOverride: async (args) => {
+      if (args[0] === 'actor' && args[1] === 'stop') {
+        const aid = args[args.length - 1];
+        stopCommands.push(aid);
+        if (aid in actorRunning) actorRunning[aid] = false;
+      }
+      if (args[0] === 'actor' && args[1] === 'start') {
+        startCommands.push(args[args.length - 1]);
+      }
+      if (args[0] === 'send') {
+        startCommands.push(`send:${args.join(' ')}`);
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execJsonOverride: async (args) => {
+      if (args[0] === 'groups') {
+        return { groups: [{ group_id: groupId, title: 'Ext Group', running: true, state: 'active' }] };
+      }
+      if (args[0] === 'group' && args[1] === 'show') {
+        return {
+          effective_scope: { path: projDir },
+          group: {
+            group_id: groupId,
+            title: 'Ext Group',
+            scopes: [{ scope_key: 's1', label: 'proj', url: projDir }],
+            actors: [
+              { id: 'codex', title: 'Codex', runtime: 'codex', command: ['codex'] },
+              { id: 'antigravity', title: 'Antigravity', runtime: 'antigravity', command: ['agy'] },
+            ],
+          },
+        };
+      }
+      if (args[0] === 'actor' && args[1] === 'list') {
+        return {
+          actors: [
+            {
+              id: 'codex',
+              title: 'Codex',
+              runtime: 'codex',
+              running: actorRunning.codex,
+              enabled: true,
+              effective_working_state: actorRunning.codex ? 'working' : 'idle',
+              command: ['codex'],
+            },
+            {
+              id: 'antigravity',
+              title: 'Antigravity',
+              runtime: 'antigravity',
+              running: actorRunning.antigravity,
+              enabled: true,
+              effective_working_state: 'idle',
+              command: ['agy'],
+            },
+          ],
+        };
+      }
+      return {};
+    },
+  });
+
+  try {
+    await bridge.ensureFileHelperSeed();
+    await bridge.readGroupLedger(groupId);
+    await bridge.setGroupPrefs(groupId, {
+      sessionRouting: {
+        enabled: true,
+        flow: 'direct',
+        permission: 'workspace-write',
+        autoReview: false,
+        slots: [
+          { slotId: 'codex', provider: 'codex', label: 'Codex', role: 'lead', mode: 'existing', sessionId: 'cx-1', cwd: projDir },
+          { slotId: 'antigravity', provider: 'antigravity', label: 'Antigravity', role: 'peer', mode: 'existing', sessionId: 'ag-1', cwd: projDir },
+          { slotId: 'agy-1', provider: 'antigravity', label: 'AG-2', role: 'peer', mode: 'existing', sessionId: 'ag-2', cwd: projDir },
+        ],
+      },
+    });
+    // Wait briefly for setGroupPrefs background auto-stop, and trigger listGroups
+    await new Promise((r) => setTimeout(r, 40));
+    const listed = await bridge.listGroups({ force: true });
+    const grp = listed.find((g) => g.id === groupId);
+    assert.ok(stopCommands.includes('codex'), 'running internal codex actor must be stopped in fully-external mode');
+    assert.ok(stopCommands.includes('antigravity'), 'running internal antigravity actor must be stopped');
+    assert.deepEqual(grp?.thinkingActorIds || [], [], 'internal ledger pending turns must not mark ghost thinking actors');
+
+    // Simulate failed external dispatches for antigravity & agy-1 while codex succeeded
+    await bridge.appendExternalDispatchMessage(groupId, {
+      by: 'codex',
+      isUser: false,
+      senderTitle: 'Codex',
+      senderRuntime: 'codex',
+      to: ['user'],
+      text: 'Codex 完成核对',
+      ok: true,
+      sessionReceipt: { slotId: 'codex', agent: 'codex', sessionId: 'cx-1' },
+    });
+    await bridge.appendExternalDispatchMessage(groupId, {
+      by: 'antigravity',
+      isUser: false,
+      senderTitle: 'Antigravity',
+      senderRuntime: 'antigravity',
+      to: ['user'],
+      text: '⚠️ Antigravity 目标会话执行异常（退出码 1）',
+      ok: false,
+      sessionReceipt: { slotId: 'antigravity', agent: 'antigravity', sessionId: 'ag-1' },
+    });
+    await bridge.appendExternalDispatchMessage(groupId, {
+      by: 'agy-1',
+      isUser: false,
+      senderTitle: 'AG-2',
+      senderRuntime: 'antigravity',
+      to: ['user'],
+      text: '⚠️ Antigravity 目标会话执行异常（退出码 1）',
+      ok: false,
+      sessionReceipt: { slotId: 'agy-1', agent: 'antigravity', sessionId: 'ag-2' },
+    });
+
+    const retryOut = await bridge.interruptOrRetryGroupTurn(groupId, { action: 'retry' });
+    for (let i = 0; i < 60 && extRetryCalls.length < 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.equal(retryOut.mode, 'external');
+    assert.deepEqual(retryOut.retriedActors.sort(), ['agy-1', 'antigravity']);
+    assert.deepEqual(
+      extRetryCalls.map((c) => c.slotId).sort(),
+      ['agy-1', 'antigravity'],
+      'top retry must re-run ONLY failed external slots without waking succeeded codex'
+    );
+    assert.equal(startCommands.length, 0, 'top retry in external mode must never wake internal cccc actors');
+
+    const appMjs = fs.readFileSync(new URL('../public/app.mjs', import.meta.url), 'utf8');
+    const stylesCss = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+    assert.equal(appMjs.includes('retrySingleActor('), false, 'broken retrySingleActor call must be removed');
+    assert.match(appMjs, /function clearAllStreamingBubbles\(/);
+    assert.match(appMjs, /is-retried-origin/);
+    assert.match(appMjs, /retry-dispatched-pill/);
+    assert.match(stylesCss, /\.retry-dispatched-pill\s*\{/);
+  } finally {
+    bridge.stop();
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+test('40. Zero-unlink in-place trajectory bridging, 2.32.1 metadata reconstruction & fast mtime-sorted JetboxWriteSummary', async () => {
+  const http = await import('node:http');
+  const { DatabaseSync } = await import('node:sqlite');
+  const {
+    ensureAntigravityCliTrajectory,
+    restoreAntigravityDesktopTrajectory,
+    healHiddenAntigravityDesktopSessions,
+    startAntigravityDesktopHubHealWatcher,
+  } = await import('../server/session-router.mjs');
+
+  const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-agy-inplace-'));
+  const deskDir = path.join(tmpRoot, 'antigravity');
+  const cliDir = path.join(tmpRoot, 'antigravity-cli');
+  const deskConvDir = path.join(deskDir, 'conversations');
+  const cliConvDir = path.join(cliDir, 'conversations');
+  const daemonDir = path.join(deskDir, 'daemon');
+  await fsp.mkdir(deskConvDir, { recursive: true });
+  await fsp.mkdir(path.join(deskDir, 'annotations'), { recursive: true });
+  await fsp.mkdir(cliConvDir, { recursive: true });
+  await fsp.mkdir(daemonDir, { recursive: true });
+
+  const sessionId = '7925c061-4a20-4bc9-9c42-637e7d03880a';
+  const deskDbPath = path.join(deskConvDir, `${sessionId}.db`);
+  const cliDbPath = path.join(cliConvDir, `${sessionId}.db`);
+
+  // Build valid Desktop DB with steps, trajectory_meta, and trajectory_metadata_blob containing project_id = 'proj-test-uuid'
+  const deskDb = new DatabaseSync(deskDbPath);
+  deskDb.exec(`
+    CREATE TABLE steps (idx INTEGER PRIMARY KEY, content TEXT);
+    CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT, trajectory_type INTEGER, source INTEGER);
+    CREATE TABLE trajectory_metadata_blob (id INTEGER PRIMARY KEY, data BLOB);
+  `);
+  deskDb.prepare('INSERT INTO steps VALUES (?, ?)').run(1, 'desktop-step-1');
+  deskDb
+    .prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?, ?)')
+    .run('traj-uuid-001', sessionId, 4, 1);
+
+  const projBytes = Buffer.from('proj-test-uuid', 'utf8');
+  const wsBytes = Buffer.from('file:///g:/', 'utf8');
+  const wsSub = Buffer.concat([
+    Buffer.from([0x0a, wsBytes.length]),
+    wsBytes,
+    Buffer.from([0x1a, 0x00]),
+  ]);
+  const createdTs = Buffer.from([0x08, 0xd5, 0xeb, 0xc2, 0xd7, 0x06, 0x10, 0x01]);
+  const sessBytes = Buffer.from(sessionId, 'utf8');
+  const metaBlob = Buffer.concat([
+    Buffer.from([0x0a, wsSub.length]),
+    wsSub,
+    Buffer.from([0x12, createdTs.length]),
+    createdTs,
+    Buffer.from([0x32, sessBytes.length]),
+    sessBytes,
+    Buffer.from([0x92, 0x01, projBytes.length]),
+    projBytes,
+  ]);
+  deskDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (1, ?)').run(metaBlob);
+  deskDb.close();
+
+  await fsp.writeFile(
+    path.join(deskDir, 'annotations', `${sessionId}.pbtxt`),
+    'title: "视觉和实践训练"\n',
+    'utf8'
+  );
+
+  // Seed corrupted 88-byte summary row missing project_id & field 17
+  const sumDb = new DatabaseSync(path.join(deskDir, 'conversation_summaries.db'));
+  sumDb.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id text PRIMARY KEY,
+      title text NOT NULL DEFAULT "",
+      preview text NOT NULL DEFAULT "",
+      step_count integer NOT NULL DEFAULT 0,
+      last_modified_time text NOT NULL DEFAULT "",
+      workspace_uris text NOT NULL DEFAULT "[]",
+      status text NOT NULL DEFAULT "",
+      source text NOT NULL DEFAULT "",
+      project_id text NOT NULL DEFAULT "",
+      agent_name text NOT NULL DEFAULT "",
+      parent_conversation_id text NOT NULL DEFAULT "",
+      nesting_depth integer NOT NULL DEFAULT 0,
+      battle_id text NOT NULL DEFAULT "",
+      winning_conversation_id text NOT NULL DEFAULT "",
+      not_fully_idle integer NOT NULL DEFAULT 0,
+      killed integer NOT NULL DEFAULT 0,
+      last_user_input_time text NOT NULL DEFAULT "",
+      last_user_input_step_index integer NOT NULL DEFAULT -1,
+      app_data_dir text NOT NULL DEFAULT "",
+      raw_summary blob,
+      group_id text NOT NULL DEFAULT ""
+    );
+  `);
+  const truncated88 = Buffer.alloc(88, 0x00);
+  // Write only field 1 ('a') so raw_summary is intentionally < 120 bytes and lacks field 17
+  truncated88[0] = 0x0a;
+  truncated88[1] = 0x01;
+  truncated88[2] = 0x61;
+  sumDb
+    .prepare(
+      `INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, workspace_uris, status, source, project_id, raw_summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(sessionId, '视觉和实践训练', '视觉和实践训练', 5, '["file:///g:/"]', 'CASCADE_RUN_STATUS_IDLE', '', '', truncated88.subarray(0, 3));
+  sumDb.close();
+
+  // Pre-seed stale 0-byte CLI stub so we verify in-place copy preserves file identity and emits zero .tmp files
+  await fsp.writeFile(cliDbPath, Buffer.alloc(0));
+  await fsp.utimes(cliDbPath, new Date(1000), new Date(1000));
+  const birthBefore = fs.statSync(cliDbPath).birthtimeMs;
+  const observedTmpFilenames = [];
+  const dirWatcher = fs.watch(cliConvDir, (_ev, fname) => {
+    if (fname && String(fname).includes('.tmp')) {
+      observedTmpFilenames.push(String(fname));
+    }
+  });
+
+  // Spin up local mock JetboxWriteSummary hub and 12 older stale hub_*.json files
+  let rpcRequests = 0;
+  const rpcServer = http.createServer((req, res) => {
+    if (req.url === '/exa.language_server_pb.LanguageServerService/JetboxWriteSummary') {
+      rpcRequests += 1;
+      res.writeHead(200, { 'Content-Type': 'application/proto' });
+      res.end(Buffer.alloc(0));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((resolve) => rpcServer.listen(0, '127.0.0.1', resolve));
+  const rpcPort = rpcServer.address().port;
+
+  let hubWatcher = null;
+  try {
+    // 12 older stale hub_*.json entries pointing at unreachable ports
+    const olderDate = new Date(Date.now() - 3600_000);
+    for (let i = 0; i < 12; i += 1) {
+      const hp = path.join(daemonDir, `hub_${1000 + i}.json`);
+      await fsp.writeFile(
+        hp,
+        JSON.stringify({ pid: process.pid, httpPort: 59900 + i, csrfToken: 'stale' }),
+        'utf8'
+      );
+      await fsp.utimes(hp, olderDate, olderDate);
+    }
+    const liveHubPath = path.join(daemonDir, `hub_${rpcPort}.json`);
+    await fsp.writeFile(
+      liveHubPath,
+      JSON.stringify({ pid: process.pid, httpPort: rpcPort, csrfToken: 'live-csrf' }),
+      'utf8'
+    );
+
+    const bridgeRes = await ensureAntigravityCliTrajectory({
+      sessionId,
+      antigravityDataDir: deskDir,
+      antigravityCliDataDir: cliDir,
+    });
+    assert.equal(bridgeRes.bridged, true);
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(
+      observedTmpFilenames.length,
+      0,
+      'ensureAntigravityCliTrajectory must NEVER create .tmp files inside conversations/'
+    );
+    assert.equal(
+      fs.statSync(cliDbPath).birthtimeMs,
+      birthBefore,
+      'cli conversations/<id>.db must be overwritten in place without unlinking'
+    );
+
+    const t0 = Date.now();
+    const restoreRes = await restoreAntigravityDesktopTrajectory({
+      sessionId,
+      antigravityDataDir: deskDir,
+      antigravityCliDataDir: cliDir,
+      keepCliDb: false,
+    });
+    const elapsedMs = Date.now() - t0;
+
+    assert.equal(restoreRes.notifiedRpc, true, 'newest-first parallel hub notification must succeed');
+    assert.equal(rpcRequests, 1);
+    assert.ok(elapsedMs < 1500, `Expected fast parallel hub delivery, took ${elapsedMs}ms`);
+
+    const checkSum = new DatabaseSync(path.join(deskDir, 'conversation_summaries.db'), { readOnly: true });
+    const healed = checkSum
+      .prepare('SELECT project_id, raw_summary, length(raw_summary) AS plen FROM conversation_summaries WHERE conversation_id = ?')
+      .get(sessionId);
+    checkSum.close();
+
+    assert.equal(healed.project_id, 'proj-test-uuid');
+    assert.ok(
+      healed.plen > 150,
+      `healed raw_summary must include full trajectory_metadata & fields, got ${healed.plen} bytes`
+    );
+    assert.ok(
+      Buffer.from(healed.raw_summary).includes(Buffer.from('proj-test-uuid')),
+      'healed protobuf must embed extracted project_id inside field 17'
+    );
+    assert.ok(
+      Buffer.from(healed.raw_summary).includes(Buffer.from('traj-uuid-001')),
+      'healed protobuf must embed trajectory_id field 4'
+    );
+
+    // Sub-check A: healHiddenAntigravityDesktopSessions must detect untitled/project-less entries in agyhub_summaries_proto.pb
+    const idBytes = Buffer.from(sessionId, 'utf8');
+    const untitledSummary = Buffer.from([0x10, 0x05]);
+    const entryPayload = Buffer.concat([
+      Buffer.from([0x0a, idBytes.length]),
+      idBytes,
+      Buffer.from([0x12, untitledSummary.length]),
+      untitledSummary,
+    ]);
+    const untitledHubPb = Buffer.concat([
+      Buffer.from([0x0a, entryPayload.length]),
+      entryPayload,
+    ]);
+    await fsp.writeFile(path.join(deskDir, 'agyhub_summaries_proto.pb'), untitledHubPb);
+    rpcRequests = 0;
+    await healHiddenAntigravityDesktopSessions({
+      antigravityDataDir: deskDir,
+      antigravityCliDataDir: cliDir,
+    });
+    assert.equal(rpcRequests, 1, 'untitled agyhub_summaries_proto.pb entry must trigger JetboxWriteSummary');
+
+    // Sub-check B: startAntigravityDesktopHubHealWatcher detects a newly appearing live hub_*.json and triggers healing
+    await fsp.rm(liveHubPath, { force: true });
+    rpcRequests = 0;
+    hubWatcher = startAntigravityDesktopHubHealWatcher({
+      antigravityDataDir: deskDir,
+      antigravityCliDataDir: cliDir,
+      intervalMs: 200,
+    });
+    await new Promise((r) => setTimeout(r, 80));
+    await fsp.writeFile(
+      liveHubPath,
+      JSON.stringify({ pid: process.pid, httpPort: rpcPort, csrfToken: 'live-csrf' }),
+      'utf8'
+    );
+    const waitDeadline = Date.now() + 700;
+    while (rpcRequests < 1 && Date.now() < waitDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    hubWatcher.stop();
+    hubWatcher = null;
+    assert.ok(rpcRequests >= 1, 'hub watcher must detect new hub_*.json and trigger JetboxWriteSummary');
+  } finally {
+    hubWatcher?.stop();
+    dirWatcher.close();
+    await new Promise((resolve) => rpcServer.close(resolve));
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  }
 });
 
 

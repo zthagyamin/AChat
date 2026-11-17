@@ -10,6 +10,7 @@ import {
   executeExternalAgentTurn,
   getActiveExternalSlots,
   isAgentRoutedExternally,
+  isGroupFullyExternallyRouted,
   normalizeSessionRouting,
   readExternalSessionPreview,
   resolveRoutingSlot,
@@ -92,6 +93,8 @@ export function buildCodexLaunchCommand(
   return parts.join(' ');
 }
 
+export const DEFAULT_AGY_FAST_MODEL = 'gemini-4-hydrogen-low';
+
 export function buildAntigravityLaunchCommand(
   agyBin = AGY_BIN,
   { gear = 'fast', model = '' } = {}
@@ -104,7 +107,7 @@ export function buildAntigravityLaunchCommand(
     return `"${agyBin}" --dangerously-skip-permissions --model ${safeModel} --disable-slash-commands`;
   }
   if (gear === 'fast') {
-    return `"${agyBin}" --dangerously-skip-permissions --model gemini-3.8-flash-low --disable-slash-commands`;
+    return `"${agyBin}" --dangerously-skip-permissions --model ${DEFAULT_AGY_FAST_MODEL} --disable-slash-commands`;
   }
   return `"${agyBin}" --dangerously-skip-permissions`;
 }
@@ -113,6 +116,7 @@ export function detectActorSpeedGear(command = []) {
   const joined = Array.isArray(command) ? command.join(' ') : String(command || '');
   if (
     joined.includes('model_reasoning_effort=low') ||
+    joined.includes(DEFAULT_AGY_FAST_MODEL) ||
     joined.includes('gemini-3.8-flash-low')
   ) {
     return 'fast';
@@ -1174,6 +1178,8 @@ export class CcccBridge extends EventEmitter {
     nowMs = Date.now(),
     lastReplyAt = {}
   ) {
+    const groupRouting = normalizeSessionRouting(this.groupPrefs[groupId]?.sessionRouting, '');
+    const fullyExternal = isGroupFullyExternallyRouted(groupRouting);
     const liveMap = this.liveActorStates.get(groupId);
     const candidateActors = new Set([
       ...Object.keys(latestActivity),
@@ -1182,72 +1188,74 @@ export class CcccBridge extends EventEmitter {
     ]);
 
     const thinkingActorIds = [];
-    for (const actorId of candidateActors) {
-      const live = liveMap?.get(actorId);
-      const act = latestActivity[actorId];
-      const isRunning = live ? live.running : act ? act.running !== false : true;
-      if (!isRunning) continue;
+    if (!fullyExternal) {
+      for (const actorId of candidateActors) {
+        const live = liveMap?.get(actorId);
+        const act = latestActivity[actorId];
+        const isRunning = live ? live.running : act ? act.running !== false : true;
+        if (!isRunning) continue;
 
-      const metaId = pendingMessageMeta?.[actorId]?.id || '';
-      const isCancelled =
-        metaId && this.cancelledPendingIds.has(`${groupId}:${actorId}:${metaId}`);
+        const metaId = pendingMessageMeta?.[actorId]?.id || '';
+        const isCancelled =
+          metaId && this.cancelledPendingIds.has(`${groupId}:${actorId}:${metaId}`);
 
-      const stateSource = live?.stateSource || '';
-      const workingState = isCancelled ? 'idle' : live?.workingState || act?.workingState || 'idle';
-      const hasActiveTask = isCancelled ? false : Boolean(live?.activeTaskId);
-      const pendingTs = isCancelled ? null : pendingSince[actorId];
-      const pendingAgeMs = pendingTs ? nowMs - new Date(pendingTs).getTime() : Infinity;
-      const isRetrying = this.retryingActors.has(`${groupId}:${actorId}`);
+        const stateSource = live?.stateSource || '';
+        const workingState = isCancelled ? 'idle' : live?.workingState || act?.workingState || 'idle';
+        const hasActiveTask = isCancelled ? false : Boolean(live?.activeTaskId);
+        const pendingTs = isCancelled ? null : pendingSince[actorId];
+        const pendingAgeMs = pendingTs ? nowMs - new Date(pendingTs).getTime() : Infinity;
+        const isRetrying = this.retryingActors.has(`${groupId}:${actorId}`);
 
-      if (stateSource === 'managed_session') {
-        const isStartingOrRetrying = isRetrying || (pendingAgeMs >= 0 && pendingAgeMs < 18_000);
-        const hasUnansweredPending = Boolean(pendingTs) && pendingAgeMs >= 0;
-        const workingUpdatedMs = live?.workingUpdatedAt
-          ? new Date(live.workingUpdatedAt).getTime()
-          : NaN;
-        const lastReplyMs = lastReplyAt?.[actorId]
-          ? new Date(lastReplyAt[actorId]).getTime()
-          : 0;
-        // Guard against stale cccc managed_session 'working' flags after a turn already replied
-        const freshAutonomousWork =
-          !hasUnansweredPending &&
-          (workingState === 'working' || hasActiveTask) &&
-          Number.isFinite(workingUpdatedMs) &&
-          workingUpdatedMs > lastReplyMs &&
-          nowMs - workingUpdatedMs >= 0 &&
-          nowMs - workingUpdatedMs < 25_000;
+        if (stateSource === 'managed_session') {
+          const isStartingOrRetrying = isRetrying || (pendingAgeMs >= 0 && pendingAgeMs < 18_000);
+          const hasUnansweredPending = Boolean(pendingTs) && pendingAgeMs >= 0;
+          const workingUpdatedMs = live?.workingUpdatedAt
+            ? new Date(live.workingUpdatedAt).getTime()
+            : NaN;
+          const lastReplyMs = lastReplyAt?.[actorId]
+            ? new Date(lastReplyAt[actorId]).getTime()
+            : 0;
+          // Guard against stale cccc managed_session 'working' flags after a turn already replied
+          const freshAutonomousWork =
+            !hasUnansweredPending &&
+            (workingState === 'working' || hasActiveTask) &&
+            Number.isFinite(workingUpdatedMs) &&
+            workingUpdatedMs > lastReplyMs &&
+            nowMs - workingUpdatedMs >= 0 &&
+            nowMs - workingUpdatedMs < 25_000;
 
-        if (
-          isStartingOrRetrying ||
-          (hasUnansweredPending && (workingState === 'working' || hasActiveTask)) ||
-          freshAutonomousWork
-        ) {
-          thinkingActorIds.push(actorId);
-        }
-      } else {
-        const pendingRecent = pendingAgeMs >= 0 && pendingAgeMs < 90_000;
-        const hasUnansweredPending = Boolean(pendingTs) && pendingAgeMs >= 0;
-        const pendingMs = pendingTs ? new Date(pendingTs).getTime() : NaN;
-        const rawOutputIso = live?.lastOutputAt || act?.lastOutputAt || '';
-        const lastOutputMs = rawOutputIso ? new Date(rawOutputIso).getTime() : NaN;
-        const hasLivePtyQuiet =
-          live?.ptyQuietSeconds !== undefined &&
-          live?.ptyQuietSeconds !== null &&
-          Number.isFinite(Number(live.ptyQuietSeconds));
-        const ptyActivelyStreaming = hasLivePtyQuiet
-          ? Number(live.ptyQuietSeconds) < 25
-          : Number.isFinite(lastOutputMs) &&
-            Number.isFinite(pendingMs) &&
-            lastOutputMs >= pendingMs &&
-            nowMs - lastOutputMs >= 0 &&
-            nowMs - lastOutputMs < 25_000;
-        if (
-          isRetrying ||
-          pendingRecent ||
-          (hasUnansweredPending && (workingState === 'working' || ptyActivelyStreaming)) ||
-          (!live && workingState === 'working')
-        ) {
-          thinkingActorIds.push(actorId);
+          if (
+            isStartingOrRetrying ||
+            (hasUnansweredPending && (workingState === 'working' || hasActiveTask)) ||
+            freshAutonomousWork
+          ) {
+            thinkingActorIds.push(actorId);
+          }
+        } else {
+          const pendingRecent = pendingAgeMs >= 0 && pendingAgeMs < 90_000;
+          const hasUnansweredPending = Boolean(pendingTs) && pendingAgeMs >= 0;
+          const pendingMs = pendingTs ? new Date(pendingTs).getTime() : NaN;
+          const rawOutputIso = live?.lastOutputAt || act?.lastOutputAt || '';
+          const lastOutputMs = rawOutputIso ? new Date(rawOutputIso).getTime() : NaN;
+          const hasLivePtyQuiet =
+            live?.ptyQuietSeconds !== undefined &&
+            live?.ptyQuietSeconds !== null &&
+            Number.isFinite(Number(live.ptyQuietSeconds));
+          const ptyActivelyStreaming = hasLivePtyQuiet
+            ? Number(live.ptyQuietSeconds) < 25
+            : Number.isFinite(lastOutputMs) &&
+              Number.isFinite(pendingMs) &&
+              lastOutputMs >= pendingMs &&
+              nowMs - lastOutputMs >= 0 &&
+              nowMs - lastOutputMs < 25_000;
+          if (
+            isRetrying ||
+            pendingRecent ||
+            (hasUnansweredPending && (workingState === 'working' || ptyActivelyStreaming)) ||
+            (!live && workingState === 'working')
+          ) {
+            thinkingActorIds.push(actorId);
+          }
         }
       }
     }
@@ -2353,118 +2361,136 @@ export class CcccBridge extends EventEmitter {
         let ledger = await this.readGroupLedger(g.group_id);
         let thinkingSet = new Set(ledger.thinkingActorIds || []);
         const nowMs = Date.now();
+        const groupRouting = normalizeSessionRouting(
+          (this.groupPrefs[g.group_id] || {}).sessionRouting,
+          ''
+        );
+        const fullyExternalGroup = isGroupFullyExternallyRouted(groupRouting);
 
         if (!this.isMockExec || this.enableWatchdogInTests) {
-          for (const a of actorsList) {
-            const healKey = `${g.group_id}:${a.id}`;
-            const lastHeal = this.autoHealCooldown.get(healKey) || 0;
-            const cmdArr = Array.isArray(a.command) ? a.command : [];
-            const isCodexActor =
-              a.id === 'codex' || String(a.runtime || '').toLowerCase().includes('codex');
-            const pendingMeta = ledger.pendingMessageMeta?.[a.id] || null;
-            const pendingAgeMs = pendingMeta?.ts ? nowMs - new Date(pendingMeta.ts).getTime() : -1;
-            const pendingRetryKey = pendingMeta?.id ? `${g.group_id}:${a.id}:${pendingMeta.id}` : '';
-            const hasUnfinishedPendingTurn = Boolean(
-              pendingRetryKey &&
-                pendingAgeMs >= 0 &&
-                pendingAgeMs < 300_000 &&
-                !this.cancelledPendingIds.has(pendingRetryKey) &&
-                !this.droppedTurnRetried.has(pendingRetryKey)
-            );
-            const missingBinary =
-              a.enabled &&
-              isCodexActor &&
-              cmdArr[0] &&
-              cmdArr[0] !== 'codex' &&
-              !fs.existsSync(cmdArr[0]);
-
-            if (missingBinary && nowMs - lastHeal > 30_000) {
-              this.autoHealCooldown.set(healKey, nowMs);
-              if (!a.running && !hasUnfinishedPendingTurn) {
-                const codexBin = await resolveCodexBinary();
-                const sandbox = detectReadOnly(cmdArr) ? 'read-only' : 'workspace-write';
-                const gear = detectActorSpeedGear(cmdArr);
-                const newCmd = buildCodexLaunchCommand(codexBin, { sandbox, gear });
-                this.execFn(
-                  ['actor', 'update', '--group', g.group_id, '--command', newCmd, a.id],
-                  { timeout: 15000 }
-                ).catch(() => {});
-                continue;
+          if (fullyExternalGroup) {
+            if (actorsList.some((a) => a && a.running)) {
+              const stopKey = `${g.group_id}:ext-stop`;
+              const lastStop = this.autoHealCooldown.get(stopKey) || 0;
+              if (nowMs - lastStop > 15_000) {
+                this.autoHealCooldown.set(stopKey, nowMs);
+                this.stopIdleInternalActorsForExternalGroup(g.group_id, actorsList).catch(
+                  () => {}
+                );
               }
-              if (pendingMeta?.id) {
-                this.droppedTurnRetried.add(pendingRetryKey);
-              }
-              this.healActorBinaryOrDroppedTurn(g.group_id, a, pendingMeta, {
-                wipeSession: false,
-              }).catch(() => {});
-              continue;
             }
+          } else {
+            for (const a of actorsList) {
+              const healKey = `${g.group_id}:${a.id}`;
+              const lastHeal = this.autoHealCooldown.get(healKey) || 0;
+              const cmdArr = Array.isArray(a.command) ? a.command : [];
+              const isCodexActor =
+                a.id === 'codex' || String(a.runtime || '').toLowerCase().includes('codex');
+              const pendingMeta = ledger.pendingMessageMeta?.[a.id] || null;
+              const pendingAgeMs = pendingMeta?.ts ? nowMs - new Date(pendingMeta.ts).getTime() : -1;
+              const pendingRetryKey = pendingMeta?.id ? `${g.group_id}:${a.id}:${pendingMeta.id}` : '';
+              const hasUnfinishedPendingTurn = Boolean(
+                pendingRetryKey &&
+                  pendingAgeMs >= 0 &&
+                  pendingAgeMs < 300_000 &&
+                  !this.cancelledPendingIds.has(pendingRetryKey) &&
+                  !this.droppedTurnRetried.has(pendingRetryKey)
+              );
+              const missingBinary =
+                a.enabled &&
+                isCodexActor &&
+                cmdArr[0] &&
+                cmdArr[0] !== 'codex' &&
+                !fs.existsSync(cmdArr[0]);
 
-            const groupShouldRun =
-              g.running !== false &&
-              g.desired_running !== false &&
-              g.state !== 'stopped' &&
-              g.state !== 'paused' &&
-              !(this.groupPrefs[g.group_id]?.archived);
-
-            if (
-              a.enabled &&
-              !a.running &&
-              hasUnfinishedPendingTurn &&
-              (groupShouldRun || a.runtime_session_status === 'resume_failed')
-            ) {
-              if (nowMs - lastHeal > 25_000) {
+              if (missingBinary && nowMs - lastHeal > 30_000) {
                 this.autoHealCooldown.set(healKey, nowMs);
-                this.droppedTurnRetried.add(pendingRetryKey);
-                this.healActorBinaryOrDroppedTurn(g.group_id, a, pendingMeta, {
-                  wipeSession: a.runtime_session_status === 'resume_failed',
-                }).catch(() => {});
-              }
-              continue;
-            }
-
-            if (!a.running && !hasUnfinishedPendingTurn) {
-              continue;
-            }
-
-            if (isCodexActor) {
-              const rec = await this.reconcileCodexPendingTurn(g.group_id, a, ledger, nowMs);
-              // Refresh local ledger snapshot if Auto-Harvest just wrote Codex's reply
-              ledger = await this.readGroupLedger(g.group_id);
-              thinkingSet = new Set(ledger.thinkingActorIds || []);
-              if (rec.activeTurnInRollout) {
-                thinkingSet.add(a.id);
-              }
-              continue;
-            }
-
-            // Fallback Watchdog for non-Codex managed_session actors
-            if (
-              a.enabled &&
-              a.running &&
-              a.runtime_state_source === 'managed_session' &&
-              (a.effective_working_state || 'idle') === 'idle' &&
-              !a.effective_active_task_id
-            ) {
-              const pendingMeta = ledger.pendingMessageMeta?.[a.id];
-              const ageMs = pendingMeta?.ts
-                ? nowMs - new Date(pendingMeta.ts).getTime()
-                : -1;
-              const retryId = pendingMeta?.id ? `${g.group_id}:${a.id}:${pendingMeta.id}` : '';
-              if (
-                retryId &&
-                ageMs >= 14_000 &&
-                ageMs < 180_000 &&
-                !this.droppedTurnRetried.has(retryId) &&
-                !this.cancelledPendingIds.has(retryId) &&
-                nowMs - lastHeal > 20_000
-              ) {
-                this.droppedTurnRetried.add(retryId);
-                this.autoHealCooldown.set(healKey, nowMs);
-                thinkingSet.add(a.id);
+                if (!a.running && !hasUnfinishedPendingTurn) {
+                  const codexBin = await resolveCodexBinary();
+                  const sandbox = detectReadOnly(cmdArr) ? 'read-only' : 'workspace-write';
+                  const gear = detectActorSpeedGear(cmdArr);
+                  const newCmd = buildCodexLaunchCommand(codexBin, { sandbox, gear });
+                  this.execFn(
+                    ['actor', 'update', '--group', g.group_id, '--command', newCmd, a.id],
+                    { timeout: 15000 }
+                  ).catch(() => {});
+                  continue;
+                }
+                if (pendingMeta?.id) {
+                  this.droppedTurnRetried.add(pendingRetryKey);
+                }
                 this.healActorBinaryOrDroppedTurn(g.group_id, a, pendingMeta, {
                   wipeSession: false,
                 }).catch(() => {});
+                continue;
+              }
+
+              const groupShouldRun =
+                g.running !== false &&
+                g.desired_running !== false &&
+                g.state !== 'stopped' &&
+                g.state !== 'paused' &&
+                !(this.groupPrefs[g.group_id]?.archived);
+
+              if (
+                a.enabled &&
+                !a.running &&
+                hasUnfinishedPendingTurn &&
+                (groupShouldRun || a.runtime_session_status === 'resume_failed')
+              ) {
+                if (nowMs - lastHeal > 25_000) {
+                  this.autoHealCooldown.set(healKey, nowMs);
+                  this.droppedTurnRetried.add(pendingRetryKey);
+                  this.healActorBinaryOrDroppedTurn(g.group_id, a, pendingMeta, {
+                    wipeSession: a.runtime_session_status === 'resume_failed',
+                  }).catch(() => {});
+                }
+                continue;
+              }
+
+              if (!a.running && !hasUnfinishedPendingTurn) {
+                continue;
+              }
+
+              if (isCodexActor) {
+                const rec = await this.reconcileCodexPendingTurn(g.group_id, a, ledger, nowMs);
+                // Refresh local ledger snapshot if Auto-Harvest just wrote Codex's reply
+                ledger = await this.readGroupLedger(g.group_id);
+                thinkingSet = new Set(ledger.thinkingActorIds || []);
+                if (rec.activeTurnInRollout) {
+                  thinkingSet.add(a.id);
+                }
+                continue;
+              }
+
+              // Fallback Watchdog for non-Codex managed_session actors
+              if (
+                a.enabled &&
+                a.running &&
+                a.runtime_state_source === 'managed_session' &&
+                (a.effective_working_state || 'idle') === 'idle' &&
+                !a.effective_active_task_id
+              ) {
+                const pendingMeta = ledger.pendingMessageMeta?.[a.id];
+                const ageMs = pendingMeta?.ts
+                  ? nowMs - new Date(pendingMeta.ts).getTime()
+                  : -1;
+                const retryId = pendingMeta?.id ? `${g.group_id}:${a.id}:${pendingMeta.id}` : '';
+                if (
+                  retryId &&
+                  ageMs >= 14_000 &&
+                  ageMs < 180_000 &&
+                  !this.droppedTurnRetried.has(retryId) &&
+                  !this.cancelledPendingIds.has(retryId) &&
+                  nowMs - lastHeal > 20_000
+                ) {
+                  this.droppedTurnRetried.add(retryId);
+                  this.autoHealCooldown.set(healKey, nowMs);
+                  thinkingSet.add(a.id);
+                  this.healActorBinaryOrDroppedTurn(g.group_id, a, pendingMeta, {
+                    wipeSession: false,
+                  }).catch(() => {});
+                }
               }
             }
           }
@@ -2478,7 +2504,7 @@ export class CcccBridge extends EventEmitter {
             const rawState = a.effective_working_state || 'idle';
             const extThink = this.externalThinkingActors.get(g.group_id)?.get(a.id) || null;
             const isThinking =
-              Boolean(extThink) || (Boolean(a.running) && thinkingSet.has(a.id));
+              Boolean(extThink) || (!fullyExternalGroup && Boolean(a.running) && thinkingSet.has(a.id));
             const thinkingSince = isThinking
               ? extThink?.since ||
                 ledger.pendingSince?.[a.id] ||
@@ -2540,7 +2566,7 @@ export class CcccBridge extends EventEmitter {
             ? 'fast'
             : actors.find((a) => a.id === 'antigravity' || a.id === 'codex')?.speedGear || 'deep';
         const speedGear =
-          prefs.speedGear && actors.some((a) => a.speedGear === prefs.speedGear)
+          prefs.speedGear === 'fast' || prefs.speedGear === 'deep'
             ? prefs.speedGear
             : detectedGear;
         const collabMode = ['free', 'relay', 'blind'].includes(prefs.collabMode)
@@ -2708,6 +2734,45 @@ export class CcccBridge extends EventEmitter {
     }
   }
 
+  async stopIdleInternalActorsForExternalGroup(groupId, actorsList = null) {
+    if (!groupId || groupId === 'file-helper') return false;
+    const routing = normalizeSessionRouting(this.groupPrefs[groupId]?.sessionRouting, '');
+    if (!isGroupFullyExternallyRouted(routing)) return false;
+    let list = Array.isArray(actorsList) ? actorsList : null;
+    if (!list) {
+      const res = await this.queryGroupActors(groupId).catch(() => ({ actors: [] }));
+      list = Array.isArray(res?.actors) ? res.actors : [];
+    }
+    const runningActors = list.filter((a) => a && a.running);
+    if (runningActors.length === 0) return false;
+    const cachedLedger = this.ledgerCache.get(groupId);
+    const liveMap = this.liveActorStates.get(groupId);
+    for (const a of runningActors) {
+      const metaId = cachedLedger?.pendingMessageMeta?.[a.id]?.id;
+      if (metaId) {
+        this.cancelledPendingIds.add(`${groupId}:${a.id}:${metaId}`);
+      }
+      if (liveMap?.has(a.id)) {
+        liveMap.set(a.id, {
+          ...liveMap.get(a.id),
+          running: false,
+          workingState: 'idle',
+          activeTaskId: null,
+        });
+      }
+    }
+    await Promise.all(
+      runningActors.map((a) =>
+        this.execFn(['actor', 'stop', '--group', groupId, a.id], { timeout: 15000 }).catch(
+          () => {}
+        )
+      )
+    );
+    this.groupShowCache.delete(groupId);
+    this.groupMetaCache.ts = 0;
+    return true;
+  }
+
   async setGroupPrefs(groupId, patch = {}) {
     if (!groupId || !/^[a-zA-Z0-9_-]+$/.test(groupId)) {
       throw new Error('非法的群聊 ID');
@@ -2745,6 +2810,13 @@ export class CcccBridge extends EventEmitter {
     this.groupPrefs[groupId] = next;
     await this.saveGroupPrefs();
     this.groupMetaCache.ts = 0;
+    if (
+      patch.sessionRouting &&
+      isGroupFullyExternallyRouted(next.sessionRouting) &&
+      (!this.isMockExec || this.enableWatchdogInTests)
+    ) {
+      this.stopIdleInternalActorsForExternalGroup(groupId).catch(() => {});
+    }
     return next;
   }
 
@@ -2853,6 +2925,61 @@ export class CcccBridge extends EventEmitter {
         });
         const groups = await this.listGroups({ force: true });
         return { ok: true, action: 'retry', groups };
+      }
+
+      const savedPrefs = this.groupPrefs[groupId] || {};
+      const routing = normalizeSessionRouting(savedPrefs.sessionRouting, '');
+      const activeExtSlots = routing.enabled ? getActiveExternalSlots(routing) : [];
+      if (activeExtSlots.length > 0) {
+        let extTargets = [];
+        if (actorId && isAgentRoutedExternally(routing, actorId)) {
+          const resolved = resolveRoutingSlot(routing, actorId);
+          extTargets = [resolved?.slotId || actorId];
+        } else if (!actorId) {
+          const board = this.ideBoards.get(groupId);
+          const boardErrIds = Object.entries(board?.actors || {})
+            .filter(([, st]) => st?.phase === 'error')
+            .map(([id]) => id)
+            .filter((id) => activeExtSlots.some((s) => s.slotId === id));
+          if (boardErrIds.length > 0) {
+            extTargets = boardErrIds;
+          } else {
+            const allMsgs = await this.getMessages(groupId);
+            let lastUserIdx = -1;
+            for (let i = allMsgs.length - 1; i >= 0; i -= 1) {
+              if (allMsgs[i]?.isUser && String(allMsgs[i].text || '').trim()) {
+                lastUserIdx = i;
+                break;
+              }
+            }
+            const tailMsgs = lastUserIdx >= 0 ? allMsgs.slice(lastUserIdx + 1) : allMsgs.slice(-12);
+            const latestBySlot = new Map();
+            for (const m of tailMsgs) {
+              if (!m || m.isUser || m.kind !== 'chat') continue;
+              const sid = m.sessionReceipt?.slotId || m.by;
+              if (sid) latestBySlot.set(sid, m);
+            }
+            const failedSlotIds = [];
+            for (const slot of activeExtSlots) {
+              const latest = latestBySlot.get(slot.slotId);
+              if (
+                latest &&
+                (latest.ok === false || String(latest.text || '').trim().startsWith('⚠️'))
+              ) {
+                failedSlotIds.push(slot.slotId);
+              }
+            }
+            extTargets =
+              failedSlotIds.length > 0 ? failedSlotIds : activeExtSlots.map((s) => s.slotId);
+          }
+        }
+        if (extTargets.length > 0) {
+          await Promise.all(
+            extTargets.map((sid) => this.retrySingleActor(groupId, { actorId: sid }))
+          );
+          const groups = await this.listGroups({ force: true });
+          return { ok: true, action: 'retry', mode: 'external', retriedActors: extTargets, groups };
+        }
       }
 
       const lastUserMsg = [...(ledger.messages || [])]
@@ -2977,6 +3104,7 @@ export class CcccBridge extends EventEmitter {
       speedGear: safeGear,
     };
     await this.saveGroupPrefs();
+    this.groupShowCache.delete(groupId);
     this.groupMetaCache.ts = 0;
     return this.listGroups({ force: true });
   }
@@ -3529,6 +3657,7 @@ export class CcccBridge extends EventEmitter {
     };
     const profiles = normalizeAgentProfiles(this.groupPrefs[groupId]?.agentProfiles);
     const actorProfile = profiles[actorId] || profiles[provider] || { displayName: '', model: '', persona: '' };
+    const effectiveModel = String(slotCfg.model || actorProfile.model || '').trim();
     const personaDirective = buildAgentPersonaDirective(provider, profiles);
     const agentCfg = slotCfg;
     let effectiveMode = agentCfg.mode || 'group';
@@ -3716,6 +3845,7 @@ export class CcccBridge extends EventEmitter {
           slotId: actorId,
           agent: provider,
           role: slotCfg.role || 'peer',
+          model: effectiveModel,
           mode: agentCfg.mode,
           sessionId: midSid || effectiveSessionId || '',
           sessionTitle: resolvedSessionTitle,
@@ -3749,7 +3879,7 @@ export class CcccBridge extends EventEmitter {
         permission: effectivePermission,
         fallbackSandbox: targetGroup.codexSandbox || 'read-only',
         gear: targetGroup.speedGear || 'deep',
-        model: actorProfile.model || '',
+        model: effectiveModel,
         replyStyle,
         codexBin,
         codexHomeDir: this.codexHomeDir,
@@ -3885,6 +4015,7 @@ export class CcccBridge extends EventEmitter {
           slotId: actorId,
           agent: provider,
           role: slotCfg.role || 'peer',
+          model: effectiveModel,
           mode: agentCfg.mode,
           sessionId: resolvedSid,
           sessionTitle: resolvedSessionTitle,
@@ -4818,8 +4949,11 @@ export class CcccBridge extends EventEmitter {
     }
 
     if (isExtBubble) {
+      const slotCfg = resolveRoutingSlot(routing, safeActor);
+      const slotLabel = slotCfg?.label || matchedBubble?.senderTitle || safeActor;
       this.cancelledExternalGroups.delete(groupId);
-      this.setExternalActorThinking(groupId, safeActor, '↻ 正在单独重试该目标会话…');
+      this.ensureGroupIdeBoard(groupId, { stageText: `↻ 正在单独重试 ${slotLabel}…` });
+      this.setExternalActorThinking(groupId, safeActor, `↻ 正在单独重试 ${slotLabel}…`);
       const runSingleExt = async () => {
         try {
           const res = await this.runTargetSessionForActor({
@@ -4837,7 +4971,7 @@ export class CcccBridge extends EventEmitter {
             by: safeActor,
             isUser: false,
             senderTitle: res.actorTitle,
-            senderRuntime: safeActor,
+            senderRuntime: res.provider || safeActor,
             to: ['user'],
             insight: `↻ 单独重试 · ${res.actorTitle}`,
             text: res.text,
@@ -4851,6 +4985,12 @@ export class CcccBridge extends EventEmitter {
               attachments: resolvedAttachments,
             },
           });
+          this.ensureGroupIdeBoard(groupId, {
+            stageText:
+              res.ok === false
+                ? `⚠️ ${res.actorTitle || slotLabel} 重试执行异常，请检查提示`
+                : `✅ ${res.actorTitle || slotLabel} 单独重试已完成`,
+          });
         } finally {
           this.setExternalActorThinking(groupId, safeActor, '');
           this.listGroups({ force: true })
@@ -4859,7 +4999,7 @@ export class CcccBridge extends EventEmitter {
         }
       };
       runSingleExt().catch(() => {});
-      return { ok: true, mode: 'external', actorId: safeActor };
+      return { ok: true, mode: 'external', actorId: safeActor, actorTitle: slotLabel };
     }
 
     // Normal group chat single-actor retry without waking peer actor

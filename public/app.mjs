@@ -376,9 +376,13 @@ const state = {
   drainingQueueGroupId: null,
   activeStreamsByGroup: new Map(), // groupId -> Map(streamId -> frame)
   paginationByGroup: new Map(), // groupId -> { startIndex, totalCount, hasMore, loadingMore }
-  retryingActorKey: '',
+  retryingActorKeys: new Set(),
+  inFlightPrefsCount: 0,
+  prefsMutationSeq: 0,
   providerEcosystem: null,
+  providerEcosystemLoadedAt: 0,
   loadingProviders: false,
+  showLegacyModels: localStorage.getItem('aw_show_legacy_models') === 'true',
   worktreesByGroup: new Map(), // groupId -> worktree[]
   computerPreviewFrame: null,
   computerPreviewTimer: null,
@@ -479,6 +483,8 @@ const els = {
   autoWakeToggleBtn: document.getElementById('autoWakeToggleBtn'),
   sessionFilterInput: document.getElementById('sessionFilterInput'),
   refreshExtSessionsBtn: document.getElementById('refreshExtSessionsBtn'),
+  refreshRoutingModelsBtn: document.getElementById('refreshRoutingModelsBtn'),
+  toggleRoutingLegacyModelsBtn: document.getElementById('toggleRoutingLegacyModelsBtn'),
   presetOneLeadTwoAgyBtn: document.getElementById('presetOneLeadTwoAgyBtn'),
   resetSessionRoutingBtn: document.getElementById('resetSessionRoutingBtn'),
   sessionSlotsList: document.getElementById('sessionSlotsList'),
@@ -530,6 +536,8 @@ const els = {
   drawerWorktreeWrap: document.getElementById('drawerWorktreeWrap'),
   drawerWorktreeList: document.getElementById('drawerWorktreeList'),
   drawerAgentProfilesSection: document.getElementById('drawerAgentProfilesSection'),
+  toggleDrawerLegacyModelsBtn: document.getElementById('toggleDrawerLegacyModelsBtn'),
+  refreshDrawerModelsBtn: document.getElementById('refreshDrawerModelsBtn'),
   drawerAgentProfilesList: document.getElementById('drawerAgentProfilesList'),
   enterMultiSelectBtn: document.getElementById('enterMultiSelectBtn'),
   exportChatBtn: document.getElementById('exportChatBtn'),
@@ -1317,21 +1325,53 @@ function computeSessionRenderKey() {
   return `${state.navTab}::${state.selectedGroupId || ''}::${q}::${state.searchingMessages ? 1 : 0}::${unreadStr}::${hitsStr}::${favStr}::${provStr}::${groupsStr}`;
 }
 
-async function loadProviderEcosystem({ force = false } = {}) {
+const PROVIDER_ECOSYSTEM_CLIENT_TTL_MS = 10 * 60 * 1000;
+
+async function loadProviderEcosystem({ force = false, silent = true } = {}) {
   if (state.loadingProviders) return state.providerEcosystem;
-  if (!force && state.providerEcosystem) return state.providerEcosystem;
+  const ageMs = Date.now() - (state.providerEcosystemLoadedAt || 0);
+  if (!force && state.providerEcosystem && ageMs < PROVIDER_ECOSYSTEM_CLIENT_TTL_MS) {
+    return state.providerEcosystem;
+  }
   state.loadingProviders = true;
+  for (const btn of [els.refreshDrawerModelsBtn, els.refreshRoutingModelsBtn]) {
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '同步中…';
+    }
+  }
   try {
     const res = await apiFetch(`/api/providers${force ? '?force=1' : ''}`);
     state.providerEcosystem = res;
+    state.providerEcosystemLoadedAt = Date.now();
     if (state.navTab === 'contacts') {
       renderSessionColumn({ force: true });
     }
+    const curGroup = getSelectedGroup();
+    if (curGroup) {
+      renderSessionTargetBar(curGroup);
+      if (els.groupDrawer && !els.groupDrawer.hidden) {
+        const editingDrawer = Boolean(
+          els.drawerAgentProfilesList?.contains(document.activeElement)
+        );
+        if (!editingDrawer) renderDrawerAgentProfiles(curGroup, { force: true });
+      }
+    }
+    if (!silent) {
+      showToast('已同步本机最新模型列表');
+    }
     return res;
-  } catch {
+  } catch (err) {
+    if (!silent) showToast(err?.message || '刷新模型列表失败');
     return null;
   } finally {
     state.loadingProviders = false;
+    for (const btn of [els.refreshDrawerModelsBtn, els.refreshRoutingModelsBtn]) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '↻ 刷新模型';
+      }
+    }
   }
 }
 
@@ -1749,6 +1789,11 @@ function updateTypingAndRelayBanners(group) {
 async function controlGroupTurn(group, action) {
   if (!group || group.kind === 'helper' || state.controllingTurn) return;
   state.controllingTurn = true;
+  const retryBtns = action === 'retry' ? [els.retryTurnBtn, els.itbRetryBtn].filter(Boolean) : [];
+  const origLabels = retryBtns.map((b) => b.textContent);
+  for (const b of retryBtns) {
+    b.textContent = '⏳ 重试中…';
+  }
   updateTypingAndRelayBanners(group);
   try {
     const res = await apiFetch(`/api/groups/${group.id}/turn-control`, {
@@ -1761,13 +1806,26 @@ async function controlGroupTurn(group, action) {
     }
     if (action === 'interrupt') {
       state.thinkingByGroup.set(group.id, []);
+      clearAllStreamingBubbles(group.id);
       showToast('已中断当前推理，Agent 已恢复待命');
     } else {
-      showToast('已重新唤醒并补发待办消息');
+      if (typeof els.messageStream?.scrollTo === 'function') {
+        els.messageStream.scrollTo({ top: els.messageStream.scrollHeight, behavior: 'smooth' });
+      } else if (els.messageStream) {
+        els.messageStream.scrollTop = els.messageStream.scrollHeight;
+      }
+      const actorHint =
+        Array.isArray(res.retriedActors) && res.retriedActors.length > 0
+          ? `：${res.retriedActors.join('、')}`
+          : '';
+      showToast(`已重新唤醒并重试${actorHint}`);
     }
   } catch (err) {
     showToast(err.message);
   } finally {
+    for (let i = 0; i < retryBtns.length; i += 1) {
+      retryBtns[i].textContent = origLabels[i];
+    }
     state.controllingTurn = false;
     renderSessionColumn();
     renderActiveHeaderAndRecipients();
@@ -1803,6 +1861,8 @@ async function switchGroupSpeedGear(group, nextGear) {
 
 async function updateGroupCollabPrefs(group, patch) {
   if (!group) return;
+  const mySeq = ++state.prefsMutationSeq;
+  state.inFlightPrefsCount += 1;
   Object.assign(group, patch);
   renderSessionColumn();
   renderActiveHeaderAndRecipients();
@@ -1811,13 +1871,15 @@ async function updateGroupCollabPrefs(group, patch) {
       method: 'POST',
       body: JSON.stringify(patch),
     });
-    if (Array.isArray(res.groups)) {
+    if (mySeq === state.prefsMutationSeq && Array.isArray(res.groups)) {
       state.groups = res.groups;
       renderSessionColumn();
       renderActiveHeaderAndRecipients();
     }
   } catch (err) {
     showToast(err.message);
+  } finally {
+    state.inFlightPrefsCount = Math.max(0, state.inFlightPrefsCount - 1);
   }
 }
 
@@ -1866,12 +1928,17 @@ function normalizeClientSessionSlot(raw = {}, idx = 0, defaultScopePath = '') {
           : `AG-${slotId.replace(/^agy-?/i, '') || idx + 1}`;
   const label = String(obj.label || defaultLabel).trim().slice(0, 24) || defaultLabel;
   const role = obj.role === 'lead' ? 'lead' : 'peer';
+  const model = String(obj.model || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._:/-]/g, '')
+    .slice(0, 80);
   const target = normalizeClientAgentTarget(obj, defaultScopePath);
   return {
     slotId,
     provider,
     label,
     role,
+    model,
     ...target,
   };
 }
@@ -2357,7 +2424,10 @@ function renderIdeTaskBoard(group) {
       retryActorBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        retrySingleActor(group.id, id);
+        retrySingleActorInUI(group, id, {
+          senderTitle: slot?.label || a.title || id,
+          triggerBtn: retryActorBtn,
+        });
       });
       summaryEl.appendChild(retryActorBtn);
     }
@@ -2479,6 +2549,7 @@ function addSlotToGroupRouting(group, provider) {
         provider: safeProv,
         label,
         role: 'peer',
+        model: '',
         mode: 'existing',
         sessionId: picked.id,
         sessionTitle: picked.title || picked.id.slice(0, 8),
@@ -2489,6 +2560,7 @@ function addSlotToGroupRouting(group, provider) {
         provider: safeProv,
         label,
         role: 'peer',
+        model: '',
         mode: defaultScope ? 'new' : 'group',
         sessionId: '',
         sessionTitle: '',
@@ -2517,25 +2589,73 @@ function applyPresetOneLeadTwoAgy(group) {
   const curCx = curRouting.slots.find((s) => s.provider === 'codex');
   const cxTarget =
     curCx && curCx.mode === 'existing' && curCx.sessionId
-      ? { mode: 'existing', sessionId: curCx.sessionId, sessionTitle: curCx.sessionTitle, cwd: curCx.cwd }
+      ? {
+          mode: 'existing',
+          sessionId: curCx.sessionId,
+          sessionTitle: curCx.sessionTitle,
+          cwd: curCx.cwd,
+          model: curCx.model || '',
+        }
       : cxList[0]
-        ? { mode: 'existing', sessionId: cxList[0].id, sessionTitle: cxList[0].title || '', cwd: cxList[0].cwd || defaultScope }
-        : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope };
+        ? {
+            mode: 'existing',
+            sessionId: cxList[0].id,
+            sessionTitle: cxList[0].title || '',
+            cwd: cxList[0].cwd || defaultScope,
+            model: curCx?.model || '',
+          }
+        : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope, model: curCx?.model || '' };
 
   const existingAgy = curRouting.slots.filter(
     (s) => s.provider === 'antigravity' && s.mode === 'existing' && s.sessionId
   );
   const ag1Target = existingAgy[0]
-    ? { mode: 'existing', sessionId: existingAgy[0].sessionId, sessionTitle: existingAgy[0].sessionTitle, cwd: existingAgy[0].cwd }
+    ? {
+        mode: 'existing',
+        sessionId: existingAgy[0].sessionId,
+        sessionTitle: existingAgy[0].sessionTitle,
+        cwd: existingAgy[0].cwd,
+        model: existingAgy[0].model || '',
+      }
     : agList[0]
-      ? { mode: 'existing', sessionId: agList[0].id, sessionTitle: agList[0].title || '', cwd: agList[0].cwd || defaultScope }
-      : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope };
+      ? {
+          mode: 'existing',
+          sessionId: agList[0].id,
+          sessionTitle: agList[0].title || '',
+          cwd: agList[0].cwd || defaultScope,
+          model: curRouting.slots.find((s) => s.slotId === 'agy-1')?.model || '',
+        }
+      : {
+          mode: 'new',
+          sessionId: '',
+          sessionTitle: '',
+          cwd: defaultScope,
+          model: curRouting.slots.find((s) => s.slotId === 'agy-1')?.model || '',
+        };
   const ag2Pick = agList.find((s) => s.id !== ag1Target.sessionId) || null;
   const ag2Target = existingAgy[1] && existingAgy[1].sessionId !== ag1Target.sessionId
-    ? { mode: 'existing', sessionId: existingAgy[1].sessionId, sessionTitle: existingAgy[1].sessionTitle, cwd: existingAgy[1].cwd }
+    ? {
+        mode: 'existing',
+        sessionId: existingAgy[1].sessionId,
+        sessionTitle: existingAgy[1].sessionTitle,
+        cwd: existingAgy[1].cwd,
+        model: existingAgy[1].model || '',
+      }
     : ag2Pick
-      ? { mode: 'existing', sessionId: ag2Pick.id, sessionTitle: ag2Pick.title || '', cwd: ag2Pick.cwd || defaultScope }
-      : { mode: 'new', sessionId: '', sessionTitle: '', cwd: defaultScope };
+      ? {
+          mode: 'existing',
+          sessionId: ag2Pick.id,
+          sessionTitle: ag2Pick.title || '',
+          cwd: ag2Pick.cwd || defaultScope,
+          model: curRouting.slots.find((s) => s.slotId === 'agy-2')?.model || '',
+        }
+      : {
+          mode: 'new',
+          sessionId: '',
+          sessionTitle: '',
+          cwd: defaultScope,
+          model: curRouting.slots.find((s) => s.slotId === 'agy-2')?.model || '',
+        };
 
   applyGroupSessionRoutingPatch(group, {
     flow: 'direct',
@@ -2620,6 +2740,7 @@ function renderSessionTargetBar(group) {
     els.autoWakeToggleBtn.classList.toggle('is-primary-tint', isWakeOn);
     els.autoWakeToggleBtn.textContent = isWakeOn ? '自动唤醒 · 开' : '自动唤醒 · 关';
   }
+  syncLegacyModelToggleButtons();
   if (els.sessionPresetSummary) {
     const flowTxt = routing.flow === 'discuss_then_exec' ? '先聊再派 IDE' : '直达会话';
     const permTxt =
@@ -2660,6 +2781,7 @@ function renderSessionTargetBar(group) {
 
       const provSel = document.createElement('select');
       provSel.className = 'srd-provider-select';
+      provSel.name = `slot_provider_${slot.slotId}`;
       provSel.setAttribute('aria-label', `${slot.label} 引擎类型`);
       const optAg = new Option('Antigravity', 'antigravity');
       const optCx = new Option('Codex', 'codex');
@@ -2669,6 +2791,7 @@ function renderSessionTargetBar(group) {
         const nextProv = provSel.value === 'codex' ? 'codex' : 'antigravity';
         updateSlotInGroupRouting(group, slot.slotId, {
           provider: nextProv,
+          model: '',
           mode: 'group',
           sessionId: '',
           sessionTitle: '',
@@ -2678,6 +2801,7 @@ function renderSessionTargetBar(group) {
       const labelInput = document.createElement('input');
       labelInput.type = 'text';
       labelInput.className = 'srd-label-input';
+      labelInput.name = `slot_label_${slot.slotId}`;
       labelInput.maxLength = 24;
       labelInput.value = slot.label;
       labelInput.placeholder = '会话别称（如 AG-1）';
@@ -2697,6 +2821,67 @@ function renderSessionTargetBar(group) {
       roleBtn.addEventListener('click', () => {
         const nextRole = slot.role === 'lead' ? 'peer' : 'lead';
         updateSlotInGroupRouting(group, slot.slotId, { role: nextRole });
+      });
+
+      const modelSel = document.createElement('select');
+      modelSel.className = 'srd-model-select';
+      modelSel.name = `slot_model_${slot.slotId}`;
+      modelSel.setAttribute('aria-label', `${slot.label} 模型选择`);
+      populateModelSelectElement(modelSel, slot.provider, slot.model || '', {
+        defaultOptionLabel: '模型：默认（随档位）',
+        allowCustomOption: true,
+      });
+
+      const customModelInput = document.createElement('input');
+      customModelInput.type = 'text';
+      customModelInput.className = 'srd-custom-model-input';
+      customModelInput.name = `slot_custom_model_${slot.slotId}`;
+      customModelInput.maxLength = 80;
+      customModelInput.hidden = true;
+      customModelInput.autocorrect = 'off';
+      customModelInput.autocapitalize = 'none';
+      customModelInput.spellcheck = false;
+      customModelInput.setAttribute('autocorrect', 'off');
+      customModelInput.setAttribute('autocapitalize', 'none');
+      customModelInput.placeholder = '输入自定义模型 ID 后按回车确认（留空恢复默认）…';
+      customModelInput.value = slot.model || '';
+      const commitCustomModel = () => {
+        const nextModel = customModelInput.value
+          .trim()
+          .replace(/[^a-zA-Z0-9._:/-]/g, '')
+          .slice(0, 80);
+        customModelInput.hidden = true;
+        if (nextModel !== (slot.model || '')) {
+          updateSlotInGroupRouting(group, slot.slotId, { model: nextModel });
+        } else {
+          modelSel.value = slot.model || '';
+        }
+      };
+      customModelInput.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          customModelInput.blur();
+        } else if (ev.key === 'Escape') {
+          customModelInput.value = slot.model || '';
+          customModelInput.hidden = true;
+          modelSel.value = slot.model || '';
+        }
+      });
+      customModelInput.addEventListener('blur', commitCustomModel);
+
+      modelSel.addEventListener('change', () => {
+        const pickedVal = String(modelSel.value || '');
+        if (pickedVal === '__custom__') {
+          customModelInput.hidden = false;
+          customModelInput.value = slot.model || '';
+          customModelInput.focus();
+          customModelInput.select();
+          return;
+        }
+        customModelInput.hidden = true;
+        if (pickedVal !== (slot.model || '')) {
+          updateSlotInGroupRouting(group, slot.slotId, { model: pickedVal });
+        }
       });
 
       const headRight = document.createElement('div');
@@ -2731,8 +2916,8 @@ function renderSessionTargetBar(group) {
         headRight.appendChild(delBtn);
       }
 
-      topRow.append(provSel, labelInput, roleBtn, headRight);
-      card.appendChild(topRow);
+      topRow.append(provSel, labelInput, roleBtn, modelSel, headRight);
+      card.append(topRow, customModelInput);
 
       const selEl = document.createElement('select');
       selEl.className = 'stb-select srd-session-select';
@@ -4125,6 +4310,8 @@ async function createMessageNode(msg, group, prevTs) {
           retrySingleActorInUI(group, msg.by, {
             messageId: msg.id,
             senderTitle: msg.senderTitle || msg.by,
+            triggerBtn: retryActorBtn,
+            sourceRow: row,
           });
         });
         actBar.appendChild(retryActorBtn);
@@ -4438,16 +4625,94 @@ function buildInteractiveCardElement(msg, group) {
   return root;
 }
 
-async function retrySingleActorInUI(group, actorId, { messageId = '', senderTitle = '' } = {}) {
+async function retrySingleActorInUI(
+  group,
+  actorId,
+  { messageId = '', senderTitle = '', triggerBtn = null, sourceRow = null } = {}
+) {
   if (!group || group.kind === 'helper' || !actorId) return;
   const lockKey = `${group.id}:${actorId}`;
-  if (state.retryingActorKey === lockKey) return;
-  state.retryingActorKey = lockKey;
+  if (state.retryingActorKeys.has(lockKey)) return;
+  state.retryingActorKeys.add(lockKey);
+
+  const origBtnText = triggerBtn ? triggerBtn.textContent : '';
+  const isCompactIconBtn = Boolean(triggerBtn?.classList?.contains('itb-slot-retry-btn'));
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.classList.remove('is-dispatched');
+    triggerBtn.classList.add('is-retrying');
+    triggerBtn.textContent = isCompactIconBtn ? '⏳' : '⏳ 正在唤醒重试…';
+  }
+
+  let jumpPillEl = null;
+  if (sourceRow) {
+    sourceRow.classList.add('is-retried-origin');
+    const actBar = sourceRow.querySelector('.msg-actions-bar');
+    if (actBar && !actBar.querySelector('.retry-dispatched-pill')) {
+      jumpPillEl = document.createElement('button');
+      jumpPillEl.type = 'button';
+      jumpPillEl.className = 'retry-dispatched-pill';
+      jumpPillEl.textContent = '↻ 已发起重试 · 查看底部实时进度 ↓';
+      jumpPillEl.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (typeof els.messageStream?.scrollTo === 'function') {
+          els.messageStream.scrollTo({ top: els.messageStream.scrollHeight, behavior: 'smooth' });
+        } else if (els.messageStream) {
+          els.messageStream.scrollTop = els.messageStream.scrollHeight;
+        }
+      });
+      actBar.appendChild(jumpPillEl);
+    }
+  }
 
   const curThinking = new Set(state.thinkingByGroup.get(group.id) || []);
   curThinking.add(actorId);
   state.thinkingByGroup.set(group.id, Array.from(curThinking));
   state.thinkingStartedAt.set(lockKey, Date.now());
+
+  const board = state.ideBoardsByGroup.get(group.id) || group.ideBoard || null;
+  if (board?.actors?.[actorId]) {
+    board.stageText = `↻ 正在单独重试 ${senderTitle || actorId}…`;
+    board.actors[actorId] = {
+      ...board.actors[actorId],
+      phase: 'running',
+      phaseLabel: '重试中',
+      currentAction: '↻ 已发送单独重试请求，正在唤醒会话…',
+    };
+    state.ideBoardsByGroup.set(group.id, board);
+    if (group.id === state.selectedGroupId) {
+      renderIdeTaskBoard(group);
+    }
+  }
+
+  const optStreamId = `opt-retry-${group.id}-${actorId}-${Date.now()}`;
+  const optFrame = {
+    groupId: group.id,
+    streamId: optStreamId,
+    by: actorId,
+    senderTitle: senderTitle || actorId,
+    phase: 'exec',
+    stepLabel: `↻ 正在单独重试 ${senderTitle || actorId}…`,
+    text: '',
+    thoughtTrace: [],
+    done: false,
+  };
+  let grpMap = state.activeStreamsByGroup.get(group.id);
+  if (!grpMap) {
+    grpMap = new Map();
+    state.activeStreamsByGroup.set(group.id, grpMap);
+  }
+  for (const [oldSid, oldFrame] of grpMap.entries()) {
+    if (oldFrame?.by === actorId) {
+      grpMap.delete(oldSid);
+      if (group.id === state.selectedGroupId) removeStreamingBubbleDom(oldSid);
+    }
+  }
+  grpMap.set(optStreamId, optFrame);
+  if (group.id === state.selectedGroupId) {
+    upsertStreamingBubbleDom(group.id, optFrame, { forceScroll: true });
+  }
+
   renderSessionColumn();
   renderActiveHeaderAndRecipients();
 
@@ -4457,11 +4722,37 @@ async function retrySingleActorInUI(group, actorId, { messageId = '', senderTitl
       body: JSON.stringify({ actorId, messageId }),
     });
     triggerLightHaptic();
-    showToast(`已单独重试 ${senderTitle || actorId}（同伴会话不重复执行）`);
+    if (triggerBtn) {
+      triggerBtn.classList.remove('is-retrying');
+      triggerBtn.classList.add('is-dispatched');
+      triggerBtn.textContent = isCompactIconBtn ? '✓' : '✓ 已发起重试';
+      setTimeout(() => {
+        if (!triggerBtn.isConnected) return;
+        triggerBtn.disabled = false;
+        triggerBtn.classList.remove('is-dispatched');
+        triggerBtn.textContent = origBtnText;
+      }, 2200);
+    }
+    showToast(`✓ 已唤醒重试 ${senderTitle || actorId}，底部已开始实时进度（同伴不受影响）`);
   } catch (err) {
+    grpMap.delete(optStreamId);
+    if (group.id === state.selectedGroupId) removeStreamingBubbleDom(optStreamId);
+    if (sourceRow) {
+      sourceRow.classList.remove('is-retried-origin');
+      jumpPillEl?.remove();
+    }
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+      triggerBtn.classList.remove('is-retrying', 'is-dispatched');
+      triggerBtn.textContent = origBtnText;
+    }
+    const nextThinking = (state.thinkingByGroup.get(group.id) || []).filter((id) => id !== actorId);
+    state.thinkingByGroup.set(group.id, nextThinking);
+    renderSessionColumn();
+    renderActiveHeaderAndRecipients();
     showToast(err.message || '单独重试失败');
   } finally {
-    state.retryingActorKey = '';
+    state.retryingActorKeys.delete(lockKey);
   }
 }
 
@@ -4545,7 +4836,7 @@ async function loadOlderGroupMessages(groupId) {
   }
 }
 
-function upsertStreamingBubbleDom(groupId, frame) {
+function upsertStreamingBubbleDom(groupId, frame, { forceScroll = false } = {}) {
   if (groupId !== state.selectedGroupId || !frame?.streamId) return;
   const nearBottom =
     els.messageStream.scrollHeight - els.messageStream.scrollTop - els.messageStream.clientHeight < 150;
@@ -4640,7 +4931,13 @@ function upsertStreamingBubbleDom(groupId, frame) {
     bodyEl.appendChild(cursor);
   }
 
-  if (nearBottom) {
+  if (forceScroll) {
+    if (typeof els.messageStream.scrollTo === 'function') {
+      els.messageStream.scrollTo({ top: els.messageStream.scrollHeight, behavior: 'smooth' });
+    } else {
+      els.messageStream.scrollTop = els.messageStream.scrollHeight;
+    }
+  } else if (nearBottom) {
     els.messageStream.scrollTop = els.messageStream.scrollHeight;
   }
 }
@@ -4662,6 +4959,22 @@ function clearStreamingBubblesForActor(groupId, actorId) {
     for (const el of els.messageStream.querySelectorAll(`[data-stream-by="${CSS.escape(actorId)}"]`)) {
       el.remove();
     }
+  }
+}
+
+function clearAllStreamingBubbles(groupId = '') {
+  if (groupId) {
+    state.activeStreamsByGroup.delete(groupId);
+    if (groupId === state.selectedGroupId) {
+      for (const el of els.messageStream.querySelectorAll('.msg-row.is-streaming[data-stream-id]')) {
+        el.remove();
+      }
+    }
+    return;
+  }
+  state.activeStreamsByGroup.clear();
+  for (const el of els.messageStream.querySelectorAll('.msg-row.is-streaming[data-stream-id]')) {
+    el.remove();
   }
 }
 
@@ -5137,20 +5450,21 @@ function renderDrawerGitFiles(group, summary) {
 
 const DEFAULT_AGENT_MODEL_PRESETS = {
   codex: [
-    { id: 'gpt-6-astra', label: 'GPT-6-Astra · 旗舰深度推理' },
     { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol · 最新主力编码' },
+    { id: 'gpt-6-astra', label: 'GPT-6-Astra · 旗舰深度推理' },
     { id: 'gpt-6.1-terra', label: 'GPT-6.1-Terra · Codex 专项模型' },
     { id: 'gpt-6-sol', label: 'GPT-6-Sol · 均衡稳健' },
     { id: 'gpt-6-luna', label: 'GPT-6-Luna · 极速轻量' },
-    { id: 'gpt-reserve', label: 'GPT-Reserve · 高速 Agent 编码' },
   ],
   antigravity: [
-    { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High) · 旗舰深度' },
-    { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium) · 均衡主力' },
-    { id: 'gemini-4-argon-low', label: 'Gemini 4 Argon (Low) · 快速响应' },
-    { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High) · 高速推理' },
-    { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash (Medium) · 轻量均衡' },
-    { id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low) · 极速低延迟' },
+    { id: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon (High) · 旗舰深度' },
+    { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon (Medium) · 均衡主力' },
+    { id: 'gemini-4-carbon-low', label: 'Gemini 4 Carbon (Low) · 轻量推理' },
+    { id: 'gemini-pro-orchestrator', label: 'Orchestrator (Carbon) · 统筹编排' },
+    { id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh) · 深度强化' },
+    { id: 'gemini-4-hydrogen-high', label: 'Gemini 4 Hydrogen (High) · 高速主力' },
+    { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen (Medium) · 快速均衡' },
+    { id: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen (Low) · 极速保底' },
     { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 (High) · 深度架构' },
     { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 (Medium) · 均衡推理' },
     { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 (High) · 主力编码' },
@@ -5166,7 +5480,8 @@ const DEFAULT_AGENT_MODEL_PRESETS = {
   opencode: [
     { id: 'openai/gpt-6-astra', label: 'OpenAI GPT-6-Astra' },
     { id: 'openai/gpt-6.1-sol', label: 'OpenAI GPT-6.1-Sol' },
-    { id: 'google/gemini-4-argon-high', label: 'Gemini 4 Argon (High)' },
+    { id: 'google/gemini-4-carbon-high', label: 'Gemini 4 Carbon (High)' },
+    { id: 'google/gemini-4-hydrogen-high', label: 'Gemini 4 Hydrogen (High)' },
     { id: 'anthropic/claude-opus-5-5', label: 'Claude Opus 5.5' },
   ],
   ollama: [
@@ -5176,7 +5491,37 @@ const DEFAULT_AGENT_MODEL_PRESETS = {
   ],
 };
 
-function resolveAgentModelPresets(actorId) {
+function isClientLegacyModel(providerId = '', modelId = '') {
+  const id = String(modelId || '').trim();
+  if (!id) return false;
+  if (providerId === 'antigravity' || providerId === 'opencode') {
+    if (
+      /gemini-3(?:\b|\.|[-_])|3\.8[-_.]?flash|\bflash(?:[-_.]lite)?\b|gemini-4-argon|orchestrator-argon/i.test(
+        id
+      )
+    ) {
+      return true;
+    }
+  }
+  if (providerId === 'codex' || providerId === 'opencode') {
+    if (/(?:^|\/)gpt-5(?:\b|\.|[-_])/i.test(id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function syncLegacyModelToggleButtons() {
+  const show = Boolean(state.showLegacyModels);
+  for (const btn of [els.toggleDrawerLegacyModelsBtn, els.toggleRoutingLegacyModelsBtn]) {
+    if (!btn) continue;
+    btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+    btn.classList.toggle('is-primary-tint', show);
+    btn.textContent = show ? '含旧模型 · 开' : '含旧模型';
+  }
+}
+
+function resolveAgentModelPresets(actorId, { includeLegacy = state.showLegacyModels } = {}) {
   const providerEntry = (state.providerEcosystem?.providers || []).find((p) => p.id === actorId);
   const fromServer = Array.isArray(providerEntry?.modelPresets) && providerEntry.modelPresets.length
     ? providerEntry.modelPresets
@@ -5184,15 +5529,63 @@ function resolveAgentModelPresets(actorId) {
       ? providerEntry.models.map((m) => ({ id: m, label: m }))
       : [];
   const defaults = DEFAULT_AGENT_MODEL_PRESETS[actorId] || [];
+  const sourceList = fromServer.length > 0 ? [...fromServer, ...defaults] : defaults;
   const merged = [];
   const seen = new Set();
-  for (const item of [...fromServer, ...defaults]) {
+  for (const item of sourceList) {
     const id = String(item?.id || '').trim();
     if (!id || seen.has(id)) continue;
+    const legacy =
+      typeof item?.legacy === 'boolean' ? item.legacy : isClientLegacyModel(actorId, id);
+    if (!includeLegacy && legacy) continue;
     seen.add(id);
-    merged.push({ id, label: String(item?.label || id).trim() });
+    merged.push({
+      id,
+      label: String(item?.label || id).trim(),
+      legacy,
+    });
   }
   return merged;
+}
+
+function populateModelSelectElement(
+  selectEl,
+  providerId,
+  currentModel = '',
+  { defaultOptionLabel = '模型：默认（随档位）', allowCustomOption = false } = {}
+) {
+  if (!selectEl) return;
+  const cur = String(currentModel || '').trim();
+  const presets = resolveAgentModelPresets(providerId);
+  selectEl.replaceChildren();
+
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = defaultOptionLabel;
+  selectEl.appendChild(defaultOpt);
+
+  if (cur && !presets.some((p) => p.id === cur)) {
+    const curOpt = document.createElement('option');
+    curOpt.value = cur;
+    curOpt.textContent = `${cur}（当前已设）`;
+    selectEl.appendChild(curOpt);
+  }
+
+  for (const item of presets) {
+    const opt = document.createElement('option');
+    opt.value = item.id;
+    opt.textContent = item.legacy ? `${item.label} [旧版]` : item.label;
+    selectEl.appendChild(opt);
+  }
+
+  if (allowCustomOption) {
+    const customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = '✏️ 手动输入其他模型 ID…';
+    selectEl.appendChild(customOpt);
+  }
+
+  selectEl.value = cur || '';
 }
 
 function renderDrawerAgentProfiles(group, { force = false } = {}) {
@@ -5202,6 +5595,7 @@ function renderDrawerAgentProfiles(group, { force = false } = {}) {
     return;
   }
   els.drawerAgentProfilesSection.hidden = false;
+  syncLegacyModelToggleButtons();
   if (
     !force &&
     els.drawerAgentProfilesList.dataset.groupId === group.id &&
@@ -5251,54 +5645,64 @@ function renderDrawerAgentProfiles(group, { force = false } = {}) {
 
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
+    nameInput.name = `profile_name_${a.id}`;
     nameInput.className = 'profile-input';
     nameInput.maxLength = 40;
     nameInput.placeholder = `岗位昵称（默认 ${baseName}）`;
     nameInput.value = curProf.displayName || '';
 
-    const presets = resolveAgentModelPresets(a.id);
-    const datalistId = presets.length > 0 ? `agentModelPresetsList-${a.id}` : 'agentModelPresetsList';
-    const exampleModel = presets[0]?.id || '';
+    const modelSel = document.createElement('select');
+    modelSel.name = `profile_model_${a.id}`;
+    modelSel.className = 'profile-input profile-model-select';
+    modelSel.setAttribute('aria-label', `${baseName} 默认模型`);
+    populateModelSelectElement(modelSel, a.id, curProf.model || '', {
+      defaultOptionLabel: '默认模型（随极速/深度档）',
+      allowCustomOption: true,
+    });
 
-    const modelInput = document.createElement('input');
-    modelInput.type = 'text';
-    modelInput.className = 'profile-input';
-    modelInput.maxLength = 64;
-    modelInput.setAttribute('list', datalistId);
-    modelInput.placeholder = exampleModel
-      ? `指定模型（如 ${exampleModel}，留空默认）`
-      : '指定模型（留空沿用默认）';
-    modelInput.value = curProf.model || '';
+    const customModelInput = document.createElement('input');
+    customModelInput.type = 'text';
+    customModelInput.name = `profile_custom_model_${a.id}`;
+    customModelInput.className = 'profile-input';
+    customModelInput.maxLength = 80;
+    customModelInput.hidden = true;
+    customModelInput.autocorrect = 'off';
+    customModelInput.autocapitalize = 'none';
+    customModelInput.spellcheck = false;
+    customModelInput.placeholder = '输入自定义模型 ID（如 gemini-4-carbon-high）…';
+    customModelInput.value = curProf.model || '';
 
-    if (presets.length > 0) {
-      const dl = document.createElement('datalist');
-      dl.id = datalistId;
-      for (const item of presets) {
-        const opt = document.createElement('option');
-        opt.value = item.id;
-        opt.label = item.label;
-        dl.appendChild(opt);
+    modelSel.addEventListener('change', () => {
+      const isCustom = modelSel.value === '__custom__';
+      customModelInput.hidden = !isCustom;
+      if (isCustom) {
+        customModelInput.focus();
+        customModelInput.select();
       }
-      card.appendChild(dl);
-    }
+    });
 
-    row1.append(nameInput, modelInput);
+    row1.append(nameInput, modelSel);
 
     const personaInput = document.createElement('input');
     personaInput.type = 'text';
+    personaInput.name = `profile_persona_${a.id}`;
     personaInput.className = 'profile-input';
     personaInput.maxLength = 360;
     personaInput.placeholder = '岗位职责人设（如：负责严查边界缺陷，给出精简修复补丁）';
     personaInput.value = curProf.persona || '';
 
-    grid.append(row1, personaInput);
+    grid.append(row1, customModelInput, personaInput);
 
     saveBtn.addEventListener('click', async () => {
+      const chosenModel =
+        modelSel.value === '__custom__'
+          ? customModelInput.value.trim().replace(/[^a-zA-Z0-9._:/-]/g, '').slice(0, 80)
+          : String(modelSel.value || '').trim();
       const nextProfiles = {
         ...profiles,
         [a.id]: {
           displayName: nameInput.value.trim(),
-          model: modelInput.value.trim(),
+          model: chosenModel,
           persona: personaInput.value.trim(),
         },
       };
@@ -7191,6 +7595,7 @@ async function refreshGroupsQuietly({ force = false } = {}) {
     els.menuStatusText.textContent = boot.daemon?.running
       ? 'CCCC 引擎运行正常'
       : 'CCCC 引擎未连接';
+    if (state.inFlightPrefsCount > 0) return;
     state.groups = boot.groups || [];
     syncThinkingStateFromGroups(state.groups);
     renderSessionColumn();
@@ -7219,6 +7624,7 @@ function connectLiveEvents() {
       hasHandledInitialSseConnect = true;
       return;
     }
+    clearAllStreamingBubbles();
     refreshGroupsQuietly();
     if (state.selectedGroupId) {
       reconcileGroupMessages(state.selectedGroupId, { scrollToBottom: true });
@@ -7331,6 +7737,14 @@ function connectLiveEvents() {
         }
         return;
       }
+      for (const [oldSid, oldFrame] of grpMap.entries()) {
+        if (oldSid !== streamId && oldFrame?.by && frame.by && oldFrame.by === frame.by) {
+          grpMap.delete(oldSid);
+          if (groupId === state.selectedGroupId) {
+            removeStreamingBubbleDom(oldSid);
+          }
+        }
+      }
       grpMap.set(streamId, frame);
       if (groupId === state.selectedGroupId) {
         upsertStreamingBubbleDom(groupId, frame);
@@ -7391,6 +7805,23 @@ function connectLiveEvents() {
       const { groupId, thinkingActorIds } = JSON.parse(ev.data);
       const nextIds = Array.isArray(thinkingActorIds) ? thinkingActorIds : [];
       state.thinkingByGroup.set(groupId, nextIds);
+      const activeMap = state.activeStreamsByGroup.get(groupId);
+      if (activeMap && activeMap.size > 0) {
+        const activeBySet = new Set();
+        for (const frame of activeMap.values()) {
+          if (frame?.by) activeBySet.add(frame.by);
+        }
+        for (const streamActor of activeBySet) {
+          if (!nextIds.includes(streamActor)) {
+            setTimeout(() => {
+              const latestThinking = state.thinkingByGroup.get(groupId) || [];
+              if (!latestThinking.includes(streamActor)) {
+                clearStreamingBubblesForActor(groupId, streamActor);
+              }
+            }, 650);
+          }
+        }
+      }
       renderSessionColumn();
       if (groupId === state.selectedGroupId) {
         renderActiveHeaderAndRecipients();
@@ -7426,6 +7857,7 @@ function connectLiveEvents() {
   es.addEventListener('groups', (ev) => {
     try {
       const { groups } = JSON.parse(ev.data);
+      if (state.inFlightPrefsCount > 0) return;
       if (Array.isArray(groups)) {
         state.groups = groups;
         syncThinkingStateFromGroups(state.groups);
@@ -7662,6 +8094,7 @@ async function initApp() {
     if (!state.externalSessionsLoaded && !state.loadingExternalSessions) {
       loadExternalSessions({ silent: true });
     }
+    loadProviderEcosystem({ force: false, silent: true });
     requestAnimationFrame(() => {
       const cur = getSelectedGroup();
       if (
@@ -7790,6 +8223,36 @@ async function initApp() {
     loadExternalSessions({ force: true, silent: false });
   });
 
+  for (const btn of [els.refreshRoutingModelsBtn, els.refreshDrawerModelsBtn]) {
+    btn?.addEventListener('click', () => {
+      triggerLightHaptic();
+      loadProviderEcosystem({ force: true, silent: false });
+    });
+  }
+
+  for (const btn of [els.toggleRoutingLegacyModelsBtn, els.toggleDrawerLegacyModelsBtn]) {
+    btn?.addEventListener('click', () => {
+      state.showLegacyModels = !state.showLegacyModels;
+      try {
+        localStorage.setItem('aw_show_legacy_models', state.showLegacyModels ? 'true' : 'false');
+      } catch {}
+      triggerLightHaptic();
+      syncLegacyModelToggleButtons();
+      const g = getSelectedGroup();
+      if (g) {
+        renderSessionTargetBar(g);
+        if (els.groupDrawer && !els.groupDrawer.hidden) {
+          renderDrawerAgentProfiles(g, { force: true });
+        }
+      }
+      showToast(
+        state.showLegacyModels
+          ? '已开启「含旧模型」：临时显示低于 Hydrogen 的历史模型'
+          : '已过滤低于 Hydrogen / GPT-5 的旧模型，仅保留主流现代模型'
+      );
+    });
+  }
+
   els.sessionFilterInput?.addEventListener('input', () => {
     state.sessionFilterQuery = els.sessionFilterInput.value || '';
     state.slotSelectCacheKeys.clear();
@@ -7818,6 +8281,7 @@ async function initApp() {
             provider: 'codex',
             label: 'Codex',
             role: 'lead',
+            model: '',
             mode: 'group',
             sessionId: '',
             sessionTitle: '',
@@ -7828,6 +8292,7 @@ async function initApp() {
             provider: 'antigravity',
             label: 'Antigravity',
             role: 'peer',
+            model: '',
             mode: 'group',
             sessionId: '',
             sessionTitle: '',
@@ -8159,14 +8624,7 @@ async function initApp() {
     const g = getSelectedGroup();
     if (!nextHidden && g) {
       renderGroupDrawer(g);
-      if (!state.providerEcosystem) {
-        loadProviderEcosystem({ force: false })
-          .then(() => {
-            const cur = getSelectedGroup();
-            if (cur && !els.groupDrawer.hidden) renderDrawerAgentProfiles(cur);
-          })
-          .catch(() => {});
-      }
+      loadProviderEcosystem({ force: false, silent: true });
     }
   });
 
@@ -8529,6 +8987,18 @@ async function initApp() {
   if (sessionInfo.assetVersion) {
     state.assetVersion = sessionInfo.assetVersion;
   }
+  if (
+    sessionInfo.isLocal &&
+    sessionInfo.serverStale &&
+    !sessionInfo.activeWork &&
+    sessionStorage.getItem('aw_restarted_srv') !== String(sessionInfo.serverVersion || '1')
+  ) {
+    sessionStorage.setItem('aw_restarted_srv', String(sessionInfo.serverVersion || '1'));
+    await apiFetch('/api/admin/restart', { method: 'POST' }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 900));
+    window.location.reload();
+    return;
+  }
   if (!sessionInfo.authorized) {
     els.emptyWatermark.hidden = false;
     els.activeChatWrap.hidden = true;
@@ -8664,6 +9134,8 @@ async function initApp() {
     state.externalSessionsLoaded = true;
     state.slotSelectCacheKeys.clear();
 
+    await loadProviderEcosystem({ force: false, silent: true }).catch(() => {});
+
     previewGroup.externalThinking = {
       codex: { label: '主审复验中', since: iso(now - 24000) },
     };
@@ -8679,6 +9151,7 @@ async function initApp() {
           provider: 'codex',
           label: 'Codex',
           role: 'lead',
+          model: 'gpt-6-astra',
           mode: 'existing',
           sessionId: 'preview-cx-lead',
           sessionTitle: 'review/cr-eval · 主审验收',
@@ -8689,6 +9162,7 @@ async function initApp() {
           provider: 'antigravity',
           label: 'AG-1·训练',
           role: 'peer',
+          model: 'gemini-4-carbon-high',
           mode: 'existing',
           sessionId: 'preview-ag1-train',
           sessionTitle: 'feat/ppo-reward · 训练',
@@ -8699,6 +9173,7 @@ async function initApp() {
           provider: 'antigravity',
           label: 'AG-2·推理',
           role: 'peer',
+          model: 'gemini-4-hydrogen-high',
           mode: 'existing',
           sessionId: 'preview-ag2-infer',
           sessionTitle: 'feat/onnx-infer · 推理',
@@ -8931,6 +9406,7 @@ async function initApp() {
   await consumeAndroidIncomingShare();
   connectLiveEvents();
   loadExternalSessions({ silent: true });
+  loadProviderEcosystem({ force: false, silent: true });
 }
 
 initApp().catch((err) => {

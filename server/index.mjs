@@ -17,6 +17,7 @@ import {
   waitForFreshScreenPreview,
 } from './fusion-hub.mjs';
 import { TunnelManager } from './tunnel-manager.mjs';
+import { startAntigravityDesktopHubHealWatcher } from './session-router.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -111,6 +112,50 @@ export async function computePublicAssetVersion(publicDir = PUBLIC_DIR) {
   }
   const version = hash.digest('hex').slice(0, 12);
   assetVersionMemo.set(resolvedDir, { sig, version });
+  return version;
+}
+
+const serverVersionMemo = new Map();
+
+export async function computeServerCodeVersion(serverDir = __dirname) {
+  const resolvedDir = path.resolve(serverDir);
+  let tracked = [];
+  try {
+    tracked = (await fsp.readdir(resolvedDir))
+      .filter((name) => name.endsWith('.mjs'))
+      .sort();
+  } catch {
+    tracked = [];
+  }
+  const statParts = [];
+  for (const rel of tracked) {
+    const full = path.join(resolvedDir, rel);
+    try {
+      const st = await fsp.stat(full);
+      statParts.push(`${rel}:${st.size}:${st.mtimeMs}`);
+    } catch {
+      statParts.push(`${rel}:missing`);
+    }
+  }
+  const sig = statParts.join('|');
+  const prev = serverVersionMemo.get(resolvedDir);
+  if (prev && prev.sig === sig) {
+    return prev.version;
+  }
+
+  const hash = crypto.createHash('sha256');
+  for (const rel of tracked) {
+    const full = path.join(resolvedDir, rel);
+    try {
+      const buf = await fsp.readFile(full);
+      hash.update(rel);
+      hash.update(buf);
+    } catch {
+      // ignore missing file
+    }
+  }
+  const version = hash.digest('hex').slice(0, 12);
+  serverVersionMemo.set(resolvedDir, { sig, version });
   return version;
 }
 
@@ -471,10 +516,12 @@ export async function startAgentWeChatServer({
 } = {}) {
   const accessToken = await loadOrCreateAccessToken(dataDir);
   const inviteCode = await loadOrCreateInviteCode(dataDir);
+  const bootServerVersion = await computeServerCodeVersion();
   const bridge = new CcccBridge({ dataDir, uploadsDir, ...bridgeOptions });
   await bridge.init({ standby: Boolean(startInStandby) });
 
   let tunnelManager = null;
+  const agyHubHealWatcher = startAntigravityDesktopHubHealWatcher();
   const sseClients = new Set();
   let lastClientActivityAt = startInStandby ? 0 : Date.now();
 
@@ -751,11 +798,17 @@ export async function startAgentWeChatServer({
 
       // Auth check endpoint for frontend (never wakes Standby Mode)
       if (req.method === 'GET' && pathname === '/api/session') {
-        const assetVersion = await computePublicAssetVersion();
+        const [assetVersion, serverVersion] = await Promise.all([
+          computePublicAssetVersion(),
+          computeServerCodeVersion(),
+        ]);
         sendJson(res, 200, {
           authorized: authed,
           isLocal: isDirectLocalRequest(req),
           assetVersion,
+          bootServerVersion,
+          serverVersion,
+          serverStale: bootServerVersion !== serverVersion,
           standby: Boolean(bridge.standbyMode),
           activeWork: Boolean(bridge.hasActiveWork()),
         });
@@ -780,12 +833,66 @@ export async function startAgentWeChatServer({
           setTimeout(async () => {
             clearInterval(statusHeartbeat);
             clearInterval(idleStandbyTimer);
+            agyHubHealWatcher.stop();
             tunnelManager?.stop();
             await bridge.enterStandby().catch(() => {
               bridge.stop();
             });
+            for (const client of sseClients) {
+              try {
+                client.end();
+              } catch {}
+            }
+            server.closeAllConnections?.();
             server.close(() => process.exit(0));
             setTimeout(() => process.exit(0), 1500);
+          }, 80);
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/admin/restart') {
+          if (!isDirectLocalRequest(req)) {
+            sendJson(res, 403, { error: '仅限本机操作' });
+            return;
+          }
+          if (bridge.hasActiveWork()) {
+            sendJson(res, 409, { error: '当前有任务执行中，暂不自动重启服务' });
+            return;
+          }
+          sendJson(res, 200, { ok: true, restarting: true });
+          setTimeout(async () => {
+            clearInterval(statusHeartbeat);
+            clearInterval(idleStandbyTimer);
+            agyHubHealWatcher.stop();
+            tunnelManager?.stop();
+            await bridge.enterStandby().catch(() => {
+              bridge.stop();
+            });
+            for (const client of sseClients) {
+              try {
+                client.end();
+              } catch {}
+            }
+            let spawned = false;
+            const spawnFreshAndExit = () => {
+              if (spawned) return;
+              spawned = true;
+              try {
+                const entryScript = fileURLToPath(import.meta.url);
+                const args = [entryScript, ...(startInStandby ? ['--standby'] : [])];
+                const child = spawn(process.execPath, args, {
+                  cwd: path.resolve(__dirname, '..'),
+                  detached: true,
+                  stdio: 'ignore',
+                  windowsHide: true,
+                });
+                child.unref();
+              } catch {}
+              process.exit(0);
+            };
+            server.closeAllConnections?.();
+            server.close(spawnFreshAndExit);
+            setTimeout(spawnFreshAndExit, 1500);
           }, 80);
           return;
         }
@@ -899,7 +1006,11 @@ export async function startAgentWeChatServer({
           const actualPort = server.address()?.port || port;
           const force = parsedUrl.searchParams.get('force') === '1';
           const [ecosystem, tailscale] = await Promise.all([
-            detectProviderEcosystem({ force }),
+            detectProviderEcosystem({
+              force,
+              dataDir,
+              codexHomeDir: bridge.codexHomeDir,
+            }),
             queryTailscaleStatus({ port: actualPort }),
           ]);
           sendJson(res, 200, { ok: true, ...ecosystem, tailscale });
@@ -1384,6 +1495,7 @@ export async function startAgentWeChatServer({
     close: () => {
       clearInterval(statusHeartbeat);
       clearInterval(idleStandbyTimer);
+      agyHubHealWatcher.stop();
       tunnelManager?.stop();
       bridge.stop();
       for (const client of sseClients) {

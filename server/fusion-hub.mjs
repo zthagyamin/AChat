@@ -421,105 +421,248 @@ export const SUPPORTED_CLI_PROVIDERS = Object.freeze([
   'ollama',
 ]);
 
+const MODEL_CACHE_TTL_MS = 30 * 60 * 1000;
+
+export function isLegacyFilteredModel(providerId = '', modelId = '') {
+  const id = String(modelId || '').trim();
+  if (!id) return false;
+  if (providerId === 'antigravity' || providerId === 'opencode') {
+    if (
+      /gemini-3(?:\b|\.|[-_])|3\.8[-_.]?flash|\bflash(?:[-_.]lite)?\b|gemini-4-argon|orchestrator-argon/i.test(
+        id
+      )
+    ) {
+      return true;
+    }
+  }
+  if (providerId === 'codex' || providerId === 'opencode') {
+    if (/(?:^|\/)gpt-5(?:\b|\.|[-_])/i.test(id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function finalizeModelPresetList(providerId, rawItems = []) {
+  const presets = [];
+  const seen = new Set();
+  for (const raw of rawItems) {
+    const id = String(raw?.id || raw?.slug || raw || '').trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const label = String(raw?.label || raw?.displayName || raw?.display_name || id).trim() || id;
+    const legacy =
+      typeof raw?.legacy === 'boolean' ? raw.legacy : isLegacyFilteredModel(providerId, id);
+    presets.push({ id, label, legacy });
+  }
+  // Keep modern non-legacy models ahead of filtered legacy entries while preserving order within each group
+  return [
+    ...presets.filter((m) => !m.legacy),
+    ...presets.filter((m) => m.legacy),
+  ];
+}
+
+function buildBuiltinMeta(id, title, vendor, rawPresets, installHint) {
+  const modelPresets = finalizeModelPresetList(id, rawPresets);
+  return {
+    id,
+    title,
+    vendor,
+    models: modelPresets.filter((m) => !m.legacy).map((m) => m.id),
+    allModels: modelPresets.map((m) => m.id),
+    modelPresets,
+    installHint,
+  };
+}
+
 export const PROVIDER_CATALOG_META = Object.freeze({
-  codex: {
-    id: 'codex',
-    title: 'OpenAI Codex',
-    vendor: 'OpenAI',
-    models: [
-      'gpt-6-astra',
-      'gpt-6.1-sol',
-      'gpt-6.1-terra',
-      'gpt-6-sol',
-      'gpt-6-luna',
-      'gpt-reserve',
-    ],
-    modelPresets: [
-      { id: 'gpt-6-astra', label: 'GPT-6-Astra · 旗舰深度推理' },
+  codex: buildBuiltinMeta(
+    'codex',
+    'OpenAI Codex',
+    'OpenAI',
+    [
       { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol · 最新主力编码' },
+      { id: 'gpt-6-astra', label: 'GPT-6-Astra · 旗舰深度推理' },
       { id: 'gpt-6.1-terra', label: 'GPT-6.1-Terra · Codex 专项模型' },
       { id: 'gpt-6-sol', label: 'GPT-6-Sol · 均衡稳健' },
       { id: 'gpt-6-luna', label: 'GPT-6-Luna · 极速轻量' },
-      { id: 'gpt-reserve', label: 'GPT-Reserve · 高速 Agent 编码' },
     ],
-    installHint: 'VS Code Codex 扩展或 npm i -g @openai/codex',
-  },
-  antigravity: {
-    id: 'antigravity',
-    title: 'Google Antigravity',
-    vendor: 'Google DeepMind',
-    models: [
-      'gemini-4-argon-high',
-      'gemini-4-argon-medium',
-      'gemini-4-argon-low',
-      'gemini-3.8-flash-high',
-      'gemini-3.8-flash-medium',
-      'gemini-3.8-flash-low',
-      'claude-opus-5-5-high',
-      'claude-opus-5-5-medium',
-      'claude-sonnet-5-5-high',
-      'claude-sonnet-5-5-medium',
-      'gpt-oss-120b-medium',
-    ],
-    modelPresets: [
-      { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High) · 旗舰深度' },
-      { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium) · 均衡主力' },
-      { id: 'gemini-4-argon-low', label: 'Gemini 4 Argon (Low) · 快速响应' },
-      { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High) · 高速推理' },
-      { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash (Medium) · 轻量均衡' },
-      { id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low) · 极速低延迟' },
+    'VS Code Codex 扩展或 npm i -g @openai/codex'
+  ),
+  antigravity: buildBuiltinMeta(
+    'antigravity',
+    'Google Antigravity',
+    'Google DeepMind',
+    [
+      { id: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon (High) · 旗舰深度' },
+      { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon (Medium) · 均衡主力' },
+      { id: 'gemini-4-carbon-low', label: 'Gemini 4 Carbon (Low) · 轻量推理' },
+      { id: 'gemini-pro-orchestrator', label: 'Orchestrator (Carbon) · 统筹编排' },
+      { id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh) · 深度强化' },
+      { id: 'gemini-4-hydrogen-high', label: 'Gemini 4 Hydrogen (High) · 高速主力' },
+      { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen (Medium) · 快速均衡' },
+      { id: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen (Low) · 极速保底' },
       { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 (High) · 深度架构' },
       { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 (Medium) · 均衡推理' },
+      { id: 'claude-opus-5-5-low', label: 'Claude Opus 5.5 (Low) · 快速思考' },
       { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 (High) · 主力编码' },
       { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 (Medium) · 快速编码' },
+      { id: 'claude-sonnet-5-5-low', label: 'Claude Sonnet 5.5 (Low) · 轻量编码' },
       { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium) · 开源大模型' },
+      { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High) · 旧档位', legacy: true },
+      { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium) · 旧档位', legacy: true },
+      { id: 'gemini-4-argon-low', label: 'Gemini 4 Argon (Low) · 旧档位', legacy: true },
+      { id: 'gemini-pro-orchestrator-argon', label: 'Orchestrator (Argon) · 旧档位', legacy: true },
+      { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High) · 旧版 Flash', legacy: true },
+      { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash (Medium) · 旧版 Flash', legacy: true },
+      { id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low) · 旧版 Flash', legacy: true },
     ],
-    installHint: 'Antigravity Desktop 内置 agy CLI',
-  },
-  claude: {
-    id: 'claude',
-    title: 'Claude Code',
-    vendor: 'Anthropic',
-    models: ['claude-opus-5-5-high', 'claude-sonnet-5-5-high', 'claude-opus-5-5', 'claude-sonnet-5-5'],
-    modelPresets: [
+    'Antigravity Desktop 内置 agy CLI'
+  ),
+  claude: buildBuiltinMeta(
+    'claude',
+    'Claude Code',
+    'Anthropic',
+    [
       { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 (High) · 旗舰推理' },
       { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 (High) · 主力编码' },
       { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
       { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
     ],
-    installHint: 'npm install -g @anthropic-ai/claude-code',
-  },
-  opencode: {
-    id: 'opencode',
-    title: 'OpenCode',
-    vendor: 'SST / OpenCode',
-    models: [
-      'openai/gpt-6-astra',
-      'openai/gpt-6.1-sol',
-      'google/gemini-4-argon-high',
-      'anthropic/claude-opus-5-5',
-    ],
-    modelPresets: [
+    'npm install -g @anthropic-ai/claude-code'
+  ),
+  opencode: buildBuiltinMeta(
+    'opencode',
+    'OpenCode',
+    'SST / OpenCode',
+    [
       { id: 'openai/gpt-6-astra', label: 'OpenAI GPT-6-Astra' },
       { id: 'openai/gpt-6.1-sol', label: 'OpenAI GPT-6.1-Sol' },
-      { id: 'google/gemini-4-argon-high', label: 'Gemini 4 Argon (High)' },
+      { id: 'google/gemini-4-carbon-high', label: 'Gemini 4 Carbon (High)' },
+      { id: 'google/gemini-4-hydrogen-high', label: 'Gemini 4 Hydrogen (High)' },
       { id: 'anthropic/claude-opus-5-5', label: 'Claude Opus 5.5' },
     ],
-    installHint: 'npm install -g opencode-ai',
-  },
-  ollama: {
-    id: 'ollama',
-    title: 'Ollama Local',
-    vendor: 'Local LLM',
-    models: ['qwen3-coder:30b', 'gpt-oss:120b', 'deepseek-r1:32b'],
-    modelPresets: [
+    'npm install -g opencode-ai'
+  ),
+  ollama: buildBuiltinMeta(
+    'ollama',
+    'Ollama Local',
+    'Local LLM',
+    [
       { id: 'qwen3-coder:30b', label: 'Qwen3 Coder 30B · 本地编码' },
       { id: 'gpt-oss:120b', label: 'GPT-OSS 120B · 本地开源' },
       { id: 'deepseek-r1:32b', label: 'DeepSeek R1 32B · 本地推理' },
     ],
-    installHint: 'https://ollama.com/download',
-  },
+    'https://ollama.com/download'
+  ),
 });
+
+const AGY_BUILTIN_HINTS = new Map(
+  PROVIDER_CATALOG_META.antigravity.modelPresets.map((item) => [item.id, item])
+);
+const CODEX_BUILTIN_HINTS = new Map(
+  PROVIDER_CATALOG_META.codex.modelPresets.map((item) => [item.id, item])
+);
+
+function agySortWeight(id = '') {
+  const s = String(id).toLowerCase();
+  if (/^gemini-(?:[5-9]|[1-9]\d)/.test(s)) return 0;
+  if (s.includes('gemini-4-carbon-high')) return 10;
+  if (s.includes('gemini-4-carbon-medium')) return 11;
+  if (s.includes('gemini-4-carbon-low')) return 12;
+  if (s.startsWith('gemini-4-carbon')) return 15;
+  if (s === 'gemini-pro-orchestrator') return 20;
+  if (s.includes('gemini-4-hydrogen-xhigh')) return 30;
+  if (s.includes('gemini-4-hydrogen-high')) return 31;
+  if (s.includes('gemini-4-hydrogen-medium')) return 32;
+  if (s.includes('gemini-4-hydrogen-low')) return 33;
+  if (s.startsWith('gemini-4-hydrogen')) return 35;
+  if (s.startsWith('claude-opus')) return 40;
+  if (s.startsWith('claude-sonnet')) return 45;
+  if (s.startsWith('gpt-oss')) return 55;
+  if (isLegacyFilteredModel('antigravity', s)) return 90;
+  return 25;
+}
+
+export function parseAgyModelsOutput(stdout = '') {
+  const items = [];
+  const seen = new Set();
+  for (const rawLine of String(stdout || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^Fetching available models/i.test(line)) continue;
+    const match = line.match(/^([a-zA-Z0-9._:/-]+)\s+(.+)$/);
+    if (!match) continue;
+    const id = match[1].trim();
+    const displayName = match[2].trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const known = AGY_BUILTIN_HINTS.get(id);
+    const legacy = isLegacyFilteredModel('antigravity', id);
+    items.push({
+      id,
+      label: known?.label || displayName || id,
+      legacy,
+      orderIdx: items.length,
+    });
+  }
+  items.sort((a, b) => {
+    const wa = agySortWeight(a.id);
+    const wb = agySortWeight(b.id);
+    if (wa !== wb) return wa - wb;
+    return a.orderIdx - b.orderIdx;
+  });
+  return finalizeModelPresetList('antigravity', items);
+}
+
+export function parseOllamaListOutput(stdout = '') {
+  const items = [];
+  const seen = new Set();
+  for (const rawLine of String(stdout || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^NAME\s+ID\s+SIZE/i.test(line)) continue;
+    const col1 = line.split(/\s+/)[0]?.trim();
+    if (!col1 || col1 === 'NAME' || seen.has(col1)) continue;
+    seen.add(col1);
+    items.push({ id: col1, label: `${col1} · 本机 Ollama`, legacy: false });
+  }
+  return items;
+}
+
+export function parseOpencodeModelsOutput(stdout = '') {
+  const items = [];
+  const seen = new Set();
+  for (const rawLine of String(stdout || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /\s/.test(line) && !line.includes('/')) continue;
+    const id = line.split(/\s+/)[0]?.trim();
+    if (!id || !id.includes('/') || seen.has(id)) continue;
+    seen.add(id);
+    items.push({ id, label: id, legacy: isLegacyFilteredModel('opencode', id) });
+  }
+  return items;
+}
+
+function execCliText(bin, args = [], { timeout = 4500 } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      bin,
+      args,
+      {
+        encoding: 'utf8',
+        timeout,
+        maxBuffer: 2 * 1024 * 1024,
+        windowsHide: true,
+      },
+      (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(String(stdout || ''));
+      }
+    );
+  });
+}
 
 export function normalizeAgentProfiles(raw = {}) {
   const src = raw && typeof raw === 'object' ? raw : {};
@@ -574,15 +717,35 @@ function findExecutableInPath(names = [], extraDirs = []) {
   return '';
 }
 
-let cachedProviderScan = { ts: 0, data: null };
+let cachedProviderScan = { ts: 0, scopeKey: '', data: null };
 
 export async function detectProviderEcosystem({
   force = false,
   codexBinHint = '',
   codexHomeDir = path.join(os.homedir(), '.codex'),
+  dataDir = '',
+  agyModelsRunnerOverride = null,
+  ollamaListRunnerOverride = null,
 } = {}) {
   const now = Date.now();
-  if (!force && cachedProviderScan.data && now - cachedProviderScan.ts < 20_000) {
+  const codexCacheFile = path.join(codexHomeDir || path.join(os.homedir(), '.codex'), 'models_cache.json');
+  let codexCacheMtime = 0;
+  try {
+    if (fs.existsSync(codexCacheFile)) {
+      codexCacheMtime = fs.statSync(codexCacheFile).mtimeMs || 0;
+    }
+  } catch {}
+  const catalogCachePath = dataDir ? path.join(dataDir, 'models-catalog-cache.json') : '';
+  const scopeKey = `${codexHomeDir}|${dataDir}|${codexCacheMtime}|${codexBinHint}`;
+
+  if (
+    !force &&
+    !agyModelsRunnerOverride &&
+    !ollamaListRunnerOverride &&
+    cachedProviderScan.data &&
+    cachedProviderScan.scopeKey === scopeKey &&
+    now - cachedProviderScan.ts < 20_000
+  ) {
     return cachedProviderScan.data;
   }
 
@@ -642,54 +805,215 @@ export async function detectProviderEcosystem({
     ollama: findExecutableInPath(['ollama'], commonExtraDirs),
   };
 
-  // Dynamically enrich Codex models from local ~/.codex/models_cache.json when available
-  const dynamicCodexPresets = [...(PROVIDER_CATALOG_META.codex.modelPresets || [])];
-  const seenCodexSlugs = new Set(dynamicCodexPresets.map((m) => m.id));
+  // Load persisted catalog cache (written only when dataDir is provided)
+  let diskCache = { updatedAt: '', providers: {} };
+  if (catalogCachePath) {
+    try {
+      if (fs.existsSync(catalogCachePath)) {
+        const parsed = JSON.parse(await fsp.readFile(catalogCachePath, 'utf8'));
+        if (parsed && typeof parsed === 'object') {
+          diskCache = {
+            updatedAt: String(parsed.updatedAt || ''),
+            providers: parsed.providers && typeof parsed.providers === 'object' ? parsed.providers : {},
+          };
+        }
+      }
+    } catch {}
+  }
+  const diskCacheTs = Date.parse(diskCache.updatedAt || '');
+  const isDiskCacheFresh = Number.isFinite(diskCacheTs) && now - diskCacheTs < MODEL_CACHE_TTL_MS;
+  let diskCacheDirty = false;
+  const nowIso = new Date(now).toISOString();
+
+  // 1. Dynamically sync Codex models from local ~/.codex/models_cache.json (excluding hidden internal slugs)
+  const liveCodexPresets = [];
+  let codexModelSource = 'builtin';
+  let codexUpdatedAt = '';
   try {
-    const cacheFile = path.join(codexHomeDir || path.join(os.homedir(), '.codex'), 'models_cache.json');
-    if (fs.existsSync(cacheFile)) {
-      const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    if (fs.existsSync(codexCacheFile)) {
+      const parsed = JSON.parse(fs.readFileSync(codexCacheFile, 'utf8'));
       const rawModels = Array.isArray(parsed?.models) ? parsed.models : [];
-      for (const m of rawModels.slice(0, 12)) {
-        const slug = String(m?.slug || '').trim();
-        if (!slug || seenCodexSlugs.has(slug)) continue;
-        seenCodexSlugs.add(slug);
-        const disp = String(m?.display_name || slug).trim();
-        const desc = String(m?.description || '').trim().slice(0, 36);
-        dynamicCodexPresets.push({
-          id: slug,
-          label: desc ? `${disp} · ${desc}` : disp,
+      const visible = rawModels
+        .filter((m) => m && typeof m === 'object' && m.visibility !== 'hide')
+        .sort((a, b) => {
+          const pa = Number.isFinite(Number(a.priority)) ? Number(a.priority) : 999;
+          const pb = Number.isFinite(Number(b.priority)) ? Number(b.priority) : 999;
+          return pa - pb;
         });
+      for (const m of visible) {
+        const slug = String(m?.slug || '').trim();
+        if (!slug) continue;
+        const known = CODEX_BUILTIN_HINTS.get(slug);
+        const disp = String(m?.display_name || slug).trim();
+        const rawDesc = String(m?.description || '').trim();
+        const shortDesc = rawDesc.length > 26 ? `${rawDesc.slice(0, 26).trimEnd()}…` : rawDesc;
+        liveCodexPresets.push({
+          id: slug,
+          label: known?.label || (shortDesc ? `${disp} · ${shortDesc}` : disp),
+          legacy: isLegacyFilteredModel('codex', slug),
+        });
+      }
+      if (liveCodexPresets.length > 0) {
+        codexModelSource = 'live';
+        codexUpdatedAt = codexCacheMtime ? new Date(codexCacheMtime).toISOString() : nowIso;
       }
     }
   } catch {
     // ignore malformed models_cache.json
   }
+  const codexMergedPresets = finalizeModelPresetList('codex', [
+    ...liveCodexPresets,
+    ...PROVIDER_CATALOG_META.codex.modelPresets,
+  ]);
+
+  // 2. Dynamically sync Antigravity models via `agy models` on-demand + disk cache fallback
+  const cachedAgy = Array.isArray(diskCache.providers?.antigravity) ? diskCache.providers.antigravity : [];
+  let agyPresets = null;
+  let agyModelSource = 'builtin';
+  let agyUpdatedAt = diskCache.updatedAt || '';
+  if (
+    agyModelsRunnerOverride ||
+    (binaryMap.antigravity && (force || cachedAgy.length === 0 || !isDiskCacheFresh))
+  ) {
+    try {
+      const rawOut = agyModelsRunnerOverride
+        ? await agyModelsRunnerOverride()
+        : await execCliText(binaryMap.antigravity, ['models'], { timeout: 4500 });
+      const parsed = parseAgyModelsOutput(rawOut);
+      if (parsed.length > 0) {
+        agyPresets = parsed;
+        agyModelSource = 'live';
+        agyUpdatedAt = nowIso;
+        diskCache.providers.antigravity = parsed;
+        diskCache.updatedAt = nowIso;
+        diskCacheDirty = true;
+      }
+    } catch {
+      // fall through cleanly to disk cache or built-in defaults
+    }
+  }
+  if (!agyPresets && cachedAgy.length > 0) {
+    agyPresets = finalizeModelPresetList('antigravity', cachedAgy);
+    agyModelSource = 'cache';
+  }
+  if (!agyPresets) {
+    agyPresets = PROVIDER_CATALOG_META.antigravity.modelPresets;
+  }
+
+  // 3. Dynamically sync Ollama local models via `ollama list`
+  const cachedOllama = Array.isArray(diskCache.providers?.ollama) ? diskCache.providers.ollama : [];
+  let ollamaPresets = null;
+  let ollamaSource = 'builtin';
+  let ollamaUpdatedAt = diskCache.updatedAt || '';
+  if (
+    ollamaListRunnerOverride ||
+    (binaryMap.ollama && (force || cachedOllama.length === 0 || !isDiskCacheFresh))
+  ) {
+    try {
+      const rawOllama = ollamaListRunnerOverride
+        ? await ollamaListRunnerOverride()
+        : await execCliText(binaryMap.ollama, ['list'], { timeout: 2500 });
+      const parsedOllama = parseOllamaListOutput(rawOllama);
+      if (parsedOllama.length > 0) {
+        ollamaPresets = finalizeModelPresetList('ollama', [
+          ...parsedOllama,
+          ...PROVIDER_CATALOG_META.ollama.modelPresets,
+        ]);
+        ollamaSource = 'live';
+        ollamaUpdatedAt = nowIso;
+        diskCache.providers.ollama = ollamaPresets;
+        diskCache.updatedAt = nowIso;
+        diskCacheDirty = true;
+      }
+    } catch {}
+  }
+  if (!ollamaPresets && cachedOllama.length > 0) {
+    ollamaPresets = finalizeModelPresetList('ollama', [
+      ...cachedOllama,
+      ...PROVIDER_CATALOG_META.ollama.modelPresets,
+    ]);
+    ollamaSource = 'cache';
+  }
+  if (!ollamaPresets) {
+    ollamaPresets = PROVIDER_CATALOG_META.ollama.modelPresets;
+  }
+
+  // 4. Opportunistic OpenCode sync if binary installed
+  const cachedOpencode = Array.isArray(diskCache.providers?.opencode) ? diskCache.providers.opencode : [];
+  let opencodePresets = null;
+  let opencodeSource = 'builtin';
+  let opencodeUpdatedAt = diskCache.updatedAt || '';
+  if (binaryMap.opencode && (force || cachedOpencode.length === 0 || !isDiskCacheFresh)) {
+    try {
+      const rawOc = await execCliText(binaryMap.opencode, ['models'], { timeout: 2500 });
+      const parsedOc = parseOpencodeModelsOutput(rawOc);
+      if (parsedOc.length > 0) {
+        opencodePresets = finalizeModelPresetList('opencode', [
+          ...parsedOc,
+          ...PROVIDER_CATALOG_META.opencode.modelPresets,
+        ]);
+        opencodeSource = 'live';
+        opencodeUpdatedAt = nowIso;
+        diskCache.providers.opencode = opencodePresets;
+        diskCache.updatedAt = nowIso;
+        diskCacheDirty = true;
+      }
+    } catch {}
+  }
+  if (!opencodePresets && cachedOpencode.length > 0) {
+    opencodePresets = finalizeModelPresetList('opencode', [
+      ...cachedOpencode,
+      ...PROVIDER_CATALOG_META.opencode.modelPresets,
+    ]);
+    opencodeSource = 'cache';
+  }
+  if (!opencodePresets) {
+    opencodePresets = PROVIDER_CATALOG_META.opencode.modelPresets;
+  }
+
+  if (diskCacheDirty && catalogCachePath) {
+    try {
+      await fsp.mkdir(path.dirname(catalogCachePath), { recursive: true });
+      await fsp.writeFile(catalogCachePath, JSON.stringify(diskCache, null, 2), 'utf8');
+    } catch {}
+  }
+
+  const providerDynamicMap = {
+    codex: { modelPresets: codexMergedPresets, modelSource: codexModelSource, modelsUpdatedAt: codexUpdatedAt },
+    antigravity: { modelPresets: agyPresets, modelSource: agyModelSource, modelsUpdatedAt: agyUpdatedAt },
+    claude: {
+      modelPresets: PROVIDER_CATALOG_META.claude.modelPresets,
+      modelSource: 'builtin',
+      modelsUpdatedAt: '',
+    },
+    opencode: { modelPresets: opencodePresets, modelSource: opencodeSource, modelsUpdatedAt: opencodeUpdatedAt },
+    ollama: { modelPresets: ollamaPresets, modelSource: ollamaSource, modelsUpdatedAt: ollamaUpdatedAt },
+  };
 
   const providers = SUPPORTED_CLI_PROVIDERS.map((id) => {
     const meta = PROVIDER_CATALOG_META[id];
+    const dyn = providerDynamicMap[id];
+    const presets = dyn.modelPresets;
     const binPath = binaryMap[id] || '';
-    if (id === 'codex') {
-      return {
-        ...meta,
-        models: dynamicCodexPresets.map((m) => m.id),
-        modelPresets: dynamicCodexPresets,
-        installed: Boolean(binPath),
-        binaryPath: binPath,
-      };
-    }
     return {
       ...meta,
+      models: presets.filter((m) => !m.legacy).map((m) => m.id),
+      allModels: presets.map((m) => m.id),
+      modelPresets: presets,
+      modelSource: dyn.modelSource,
+      modelsUpdatedAt: dyn.modelsUpdatedAt,
       installed: Boolean(binPath),
       binaryPath: binPath,
     };
   });
 
   const payload = {
-    scannedAt: new Date(now).toISOString(),
+    scannedAt: nowIso,
     providers,
   };
-  cachedProviderScan = { ts: now, data: payload };
+  if (!agyModelsRunnerOverride && !ollamaListRunnerOverride) {
+    cachedProviderScan = { ts: now, scopeKey, data: payload };
+  }
   return payload;
 }
 
