@@ -5688,6 +5688,8 @@ test('39. Multi-session external retry routing, internal actor auto-stop & UI re
     assert.match(appMjs, /function clearAllStreamingBubbles\(/);
     assert.match(appMjs, /is-retried-origin/);
     assert.match(appMjs, /retry-dispatched-pill/);
+    assert.match(appMjs, /state\.ideBoardsByGroup\.delete\(g\.id\)/);
+    assert.match(appMjs, /state\.ideBoardsByGroup\.delete\(groupId\)/);
     assert.match(stylesCss, /\.retry-dispatched-pill\s*\{/);
   } finally {
     bridge.stop();

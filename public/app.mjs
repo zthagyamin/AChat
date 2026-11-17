@@ -1662,6 +1662,11 @@ function renderSessionColumn({ force = false } = {}) {
   }
 }
 
+function isIdeBoardFresh(board) {
+  const boardUpdatedMs = board?.updatedAt ? new Date(board.updatedAt).getTime() : 0;
+  return boardUpdatedMs > 0 && Date.now() - boardUpdatedMs < 60_000;
+}
+
 function getThinkingActorsForGroup(group) {
   if (!group || group.kind === 'helper') return [];
   const liveIds = state.thinkingByGroup.get(group.id);
@@ -1682,9 +1687,12 @@ function getThinkingActorsForGroup(group) {
   for (const extId of Object.keys(extThinkMap)) {
     idSet.add(extId);
   }
+  const boardFresh = isIdeBoardFresh(board);
   for (const [aid, ast] of Object.entries(board?.actors || {})) {
-    if (['aligning', 'running', 'collab', 'reviewing', 'rework'].includes(ast?.phase)) {
-      idSet.add(aid);
+    if (ACTIVE_IDE_PHASES.has(ast?.phase)) {
+      if (extThinkMap[aid] || (Array.isArray(liveIds) && liveIds.includes(aid)) || boardFresh) {
+        idSet.add(aid);
+      }
     }
   }
   const result = [];
@@ -7550,6 +7558,41 @@ function syncThinkingStateFromGroups(groups) {
       if (!existingBoard || nextTs >= prevTs) {
         state.ideBoardsByGroup.set(g.id, g.ideBoard);
       }
+    } else if ('ideBoard' in g) {
+      state.ideBoardsByGroup.delete(g.id);
+    }
+
+    const activeSet = new Set(thinkingIds);
+    const curBoard = state.ideBoardsByGroup.get(g.id) || null;
+    if (curBoard && isIdeBoardFresh(curBoard)) {
+      for (const [aid, ast] of Object.entries(curBoard.actors || {})) {
+        if (ACTIVE_IDE_PHASES.has(ast?.phase)) {
+          activeSet.add(aid);
+        }
+      }
+    }
+
+    const keyPrefix = `${g.id}:`;
+    for (const key of Array.from(state.thinkingStartedAt.keys())) {
+      if (key.startsWith(keyPrefix)) {
+        const actorId = key.slice(keyPrefix.length);
+        if (!activeSet.has(actorId)) {
+          state.thinkingStartedAt.delete(key);
+        }
+      }
+    }
+
+    const activeStreamMap = state.activeStreamsByGroup.get(g.id);
+    if (activeStreamMap && activeStreamMap.size > 0) {
+      const activeBySet = new Set();
+      for (const frame of activeStreamMap.values()) {
+        if (frame?.by) activeBySet.add(frame.by);
+      }
+      for (const streamActor of activeBySet) {
+        if (!activeSet.has(streamActor)) {
+          clearStreamingBubblesForActor(g.id, streamActor);
+        }
+      }
     }
   }
 }
@@ -7790,11 +7833,16 @@ function connectLiveEvents() {
     try {
       const payload = JSON.parse(ev.data || '{}');
       const { groupId, ideBoard } = payload;
-      if (!groupId || !ideBoard) return;
-      state.ideBoardsByGroup.set(groupId, ideBoard);
+      if (!groupId) return;
+      if (!ideBoard) {
+        state.ideBoardsByGroup.delete(groupId);
+      } else {
+        state.ideBoardsByGroup.set(groupId, ideBoard);
+      }
       if (groupId === state.selectedGroupId) {
         renderIdeTaskBoard(getSelectedGroup());
       }
+      renderSessionColumn();
     } catch {
       // ignore malformed ideBoard frame
     }

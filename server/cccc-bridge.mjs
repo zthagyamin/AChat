@@ -4894,6 +4894,24 @@ export class CcccBridge extends EventEmitter {
           });
         }
       } finally {
+        const leftoverExt = this.externalThinkingActors.get(groupId);
+        if (leftoverExt && leftoverExt.size > 0) {
+          for (const aid of Array.from(leftoverExt.keys())) {
+            this.setExternalActorThinking(groupId, aid, '');
+          }
+        }
+        const finBoard = this.ideBoards.get(groupId);
+        if (finBoard && finBoard.actors) {
+          for (const [aid, aState] of Object.entries(finBoard.actors)) {
+            if (aState && ['aligning', 'running', 'collab', 'reviewing', 'rework'].includes(aState.phase)) {
+              this.updateActorIdeBoardState(groupId, aid, {
+                phase: 'idle',
+                phaseLabel: '已结束',
+                currentAction: '',
+              });
+            }
+          }
+        }
         this.emit('relay', { groupId, active: false, step: 0, text: '' });
         this.listGroups({ force: true })
           .then((gs) => this.emit('groups', gs))
